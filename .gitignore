@@ -1,0 +1,39 @@
+# --- Python / environment ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# --- Runtime data: recipe, not ingredients ---
+workspace/
+
+# --- Local config & secrets ---
+config.toml
+.env
+*credentials*.json
+
+# --- Claude Code personal files ---
+CLAUDE.local.md
+.claude/settings.local.json
+
+# --- Obsidian (vault lives in the docs folder) ---
+**/.obsidian/
+**/.trash/
+
+# --- OS / editor clutter ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+
+# --- Media safety net (in case something lands outside workspace/) ---
+*.mp4
+*.webm
+*.mkv
+*.m4a
+*.mp3
+*.wav
+*.part
+# !tests/fixtures/**
