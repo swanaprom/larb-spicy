@@ -10,3 +10,9 @@ Gotchas for the next maintainer. Details and evidence live in [TECH.md](TECH.md)
 ## Rendering looks wrong but no error?
 
 FFmpeg does **not** fail when a song's end time is past the real length of the video. It quietly makes a broken, out-of-sync file. Song lengths must be checked before rendering (see TECH.md §10). The YouTube metadata length is rounded to whole seconds, so the early check alone is not enough.
+
+## Settings won't save, or won't load?
+
+- Windows refuses to replace `config.toml` while another program has it open (seen as "Access is denied"). Close whatever has it open; the program should retry by itself.
+- If you edit `config.toml` in Notepad, a "UTF-8 with BOM" save used to break Python's TOML reader. Reading with `utf-8-sig` fixes it (TECH.md §5). Keep that in the code, it is not a typo.
+- Comments you type into `config.toml` disappear on the next save. That is normal; the commented reference is `config/example.toml`.

@@ -68,6 +68,15 @@ Record answers in §11 Findings log, then update the relevant section below.
 - Written once per run (at Run), after whole-config validation. Atomic write: write to a temp file **in the same directory**, then `os.replace()` onto `config.toml`. [known]
 - TOML writers drop comments and may reorder keys → comments live only in `config/example.toml`. [known]
 - Unsaved edits on GUI close: save or prompt (see SPEC §7).
+- Tested 2026-09-27 with `tomli-w 1.2.0` (installed in the venv; **not yet added to `requirements.txt`**, since pins need the maintainer). Script: `scratch/spike_toml.py`. All results [found]:
+  - Defaults for exactly the SPEC §7 keys generate on first run and read back identically. Round trip is exact for Thai text, Windows backslash paths (written escaped, e.g. `"D:\งานเต้น\…"`), `[]()&`, URL queries, and floats like `0.1`. Table and key order are kept (dict order).
+  - Comments are dropped on write (as expected).
+  - `None` is not a TOML value. `tomli_w.dumps` raises `TypeError` **before** the disk is touched. Empty string / empty list are fine, so use those for "unset".
+  - A hand-edited broken file gives `TOMLDecodeError: Invalid value (at line 2, column 10)`. Wrap it in a project error and show the position to the operator.
+  - Atomic write (`mkstemp` in the same dir → write → `fsync` → `os.replace`): a simulated crash before the replace leaves the old file intact and no `.tmp` behind.
+  - ⚠ **Windows: `os.replace` fails with `PermissionError: [WinError 5] Access is denied` while another handle has `config.toml` open** (another program, antivirus, sync client). Fix: retry a few times with a short sleep (tested: it succeeded once the other handle closed), and never keep the config file open in our own code (`with open(...)` only).
+  - ⚠ **`tomllib` rejects a UTF-8 BOM** (`Invalid statement (at line 1, column 1)`), which Notepad writes when saved as "UTF-8 with BOM". Fix: `tomllib.loads(path.read_text(encoding="utf-8-sig"))`. That reads BOM and non-BOM files the same; CRLF line endings are fine.
+  - Missing or unknown keys can be found by comparing against the defaults dict. That's the basis for "fill in missing keys with defaults" on load.
 
 ## 6. GUI (Tkinter)
 
@@ -152,7 +161,7 @@ Plus downloads: ~4 s/song for audio, ~11 s/song for 720p video on this connectio
 | Video / audio length | 202.68 s / **177.71 s** ✗ | 202.70 s / 202.70 s |
 
 - About **5.8× faster** end to end, at a higher resolution. The prototype log has no timestamps, so its download/render split is unknown. Its `format: "mp4"` pulls a slow fragmented stream (visible as `.part-FragN` files). [found 2026-09-26]
-- Prototype defects seen (for the record, not to fix): the output size is taken from the first clip (the 640×360 countdown), so 720p songs are cropped or downscaled; the final audio is 25 s shorter than the video. [found]
+- Prototype defects seen (for the record, not to fix): the output size is taken from the first clip (the 640×360 countdown), so 720p songs are cropped or downscaled; the final audio is 25 s shorter than the video, and per the operator's listening check it contains **only the countdown audio, none of the songs**. It did get one thing right: the countdown volume is normalized (`AudioNormalize`). [found; audio content confirmed by operator 2026-09-27]
 - This is a baseline the maintainer can turn into the SPEC §2 target, e.g. "≤ 25 s per song end-to-end for 720p video on the reference PC". It's not set here.
 
 **Long lists: chunk, then join** — `scratch/spike_chunks.py`. The graph-in-file (§3) already removes the command-line limit. Chunking is still useful to bound memory and per-run risk, and to resume after a crash. Three join methods were tried on the same songs (audio: 10 songs, chunks of 5; video: 6 songs, chunks of 3):
@@ -168,11 +177,33 @@ Plus downloads: ~4 s/song for audio, ~11 s/song for 720p video on this connectio
 - Chunk boundaries must fall at a countdown (the chunk must start with a countdown's second half). Detecting a long list is then simply "more than K songs → split every K songs". [found]
 - Audio-only never needs chunking: its single pass takes about 1 s per song. [found]
 
+- In method C, `hvideo_N.mp4` has **no audio on purpose**. It's the intermediate copy-joined video (`-map 0:v`) before the one-pass audio is muxed in to make `hybrid_N.mp4`. [known]
+
+**Audio normalization** — `scratch/spike_loudness.py`. 4 songs + 4 countdowns, target `I=-14 LUFS, TP=-1.5 dBTP, LRA=11`. Scored by the measured loudness of each segment's middle in the output:
+
+| Mode | Songs (LUFS) | Countdown (LUFS) | Spread | Extra time |
+| --- | --- | --- | --- | --- |
+| none | −5.4 … −10.9 | −28.1 | 22.7 LU | — |
+| peak to −1 dBFS (= moviepy `AudioNormalize`) | −6.4 … −11.9 | −14.1 | 7.7 LU | 4 s measuring |
+| `loudnorm` single pass (dynamic) | −13.2 … −16.3 | −13.8 | 3.1 LU | +3 s render |
+| **`loudnorm` two-pass, `linear=true`** | **−14.2 … −14.8** | **−15.0** | **0.8 LU** | **~1.2 s measuring per clip** |
+
+- **Two-pass linear is the one to use.** Pass 1 measures each clip's exact trimmed range (`loudnorm=…:print_format=json -f null -`). Pass 2 is `loudnorm=…:measured_I=…:measured_TP=…:measured_LRA=…:measured_thresh=…:offset=…:linear=true`, placed in each segment's chain inside the one-pass graph, **before** `aresample=48000`, because loudnorm outputs 192 kHz. [found 2026-09-27]
+- Confirmed it really stayed linear (`normalization_type: linear`, one fixed gain, no pumping) for the countdown (+13 dB) and the songs. loudnorm quietly falls back to dynamic when a linear gain would break the true-peak limit, so check `normalization_type` from pass 2 and log it. [found]
+- The K-pop masters measured −5 to −8 LUFS with true peaks **above 0 dBTP** (+1.32, +0.37). The countdown is −27 LUFS. At −14 they're turned down 6–9 dB; a louder target means the countdown needs more boost and hits the true-peak limit sooner. [found]
+- Measuring can reuse the cache: a clip's measurement depends only on (file, start, end), so it can be cached next to the media. [known]
+- Output for a listening check: `workspace/spike/norm/norm_twopass.mp3` (compare `norm_none.mp3`). [not yet listened to by the operator]
+
+**Maintainer decisions received 2026-09-27** (to be written into SPEC by the maintainer):
+- End time past song length **after download, within ~1 s**: **trim to fit, with a warning** (not a row error). Larger overruns are still caught at manifest stage by the metadata check (§9).
+- **JS runtime: not required.** Don't install or require Deno/Node unless yt-dlp actually breaks without one. Note: the tests in this spike ran with Node on PATH; the operator has since removed it from PATH.
+- Speed target: the numbers above are enough.
+
 **Open flags for the maintainer** (not decided here, per CLAUDE.md):
-1. **"End time past song length" row error** is now caught at manifest stage via metadata (§9), but it adds 0.4–2.7 s of network per row at validation time. The rounding means a second check after download is still needed. That second check is a new failure point at download/render stage that SPEC §8/§9 doesn't have. Is it a row error (skip the song) or a clamp with a warning when the overrun is under ~1 s?
+1. **SPEC clarification needed — mirror.** The operator's intent has two modes: (a) **mirror everything**: rows marked already-mirrored in the sheet's "Mirrored แล้ว" column are left as they are, all others get `hflip`; (b) **leave as is**: nothing is flipped, whatever the column says. The current SPEC has only `processing.mirror = true/false` and doesn't mention the column, so it reads as "flip everything" or "flip nothing".
 2. **Download format/quality config** (SPEC §7 TODO): 720p cap + H.264 preference works (§9).
-3. **JS runtime:** Node works and silences the deprecation warning. Deno is still yt-dlp's default and wasn't tested. Should `setup_once` require Node, Deno, or neither?
-4. **Per-row "Mirrored แล้ว" sheet column** exists, but the spec has only the global `processing.mirror`.
+3. **Normalization** is not in the SPEC §7 schema. Target loudness (−14 LUFS used here) and on/off would be new config keys, which is a schema change.
+4. **`tomli-w` pin:** 1.2.0 was installed for the test; `requirements.txt` is still empty.
 
 ## 11. Findings log
 
@@ -180,6 +211,9 @@ Newest first. Date · what was tried · result · where it's now documented.
 
 | Date | Finding | Result | Documented in |
 | ---- | ------- | ------ | ------------- |
+| 2026-09-27 | TOML generate/read/write with tomli-w 1.2.0 | round trip exact; Windows `os.replace` fails on open file → retry; BOM rejected → `utf-8-sig` | §5 |
+| 2026-09-27 | Audio normalization, 4 modes | two-pass linear loudnorm: 0.8 LU spread (none 22.7, peak 7.7, dynamic 3.1) | §10 |
+| 2026-09-27 | `hvideo_6.mp4` silent | intended (intermediate video-only file of the hybrid join) | §10 |
 | 2026-09-26 | moviepy prototype vs this pipeline, same 5 songs | 605 s vs 104 s; prototype output 360p with audio 25 s short | §10 |
 | 2026-09-26 | Chunk + join: re-encode / copy-concat / hybrid | hybrid exact and ~10 % over one pass; copy-concat has 9–19 ms audio dropouts | §10 |
 | 2026-09-26 | ±1 s padding with clamp | exact lengths, clamps at file start/end | §10 |
