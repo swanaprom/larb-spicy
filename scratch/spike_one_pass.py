@@ -49,8 +49,11 @@ def duration(path: Path) -> float:
 
 
 def build(segments, out: Path, video: bool, mirror: bool, d: float, acodec: list[str],
-          pad: float = 0.0):
+          pad: float = 0.0, anorm=None):
     """segments: list of (path, start, end, is_countdown). end=None -> whole file.
+
+    anorm: optional callable (index, path, start, dur) -> audio filter string
+    (e.g. "volume=-3.2dB" or a loudnorm) applied to that segment before resampling.
 
     pad: extend each SONG clip by this many seconds on both sides, clamped to
     [0, real file length]. Countdowns are never padded.
@@ -70,7 +73,10 @@ def build(segments, out: Path, video: bool, mirror: bool, d: float, acodec: list
         # Input-side seek + -t: accurate when re-encoding, and avoids decoding the whole song.
         args += ["-ss", f"{start:.3f}", "-t", f"{dur:.3f}", "-i", str(path)]
         # Normalize audio so every join has identical format (inputs differ: 44.1k vs 48k).
-        af.append(f"[{i}:a]aresample={RATE},aformat=sample_fmts=fltp:channel_layouts=stereo,"
+        norm = anorm(i, path, start, dur) if anorm else ""
+        norm = f"{norm}," if norm else ""
+        # (resample AFTER norm: loudnorm outputs 192 kHz internally)
+        af.append(f"[{i}:a]{norm}aresample={RATE},aformat=sample_fmts=fltp:channel_layouts=stereo,"
                   f"asetpts=PTS-STARTPTS[a{i}]")
         if video:
             flip = ",hflip" if (mirror and not is_cd) else ""
