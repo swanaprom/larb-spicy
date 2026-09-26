@@ -241,6 +241,17 @@ Dependency strategy: **stable where possible, fresh where necessary.**
 
 Key fact: a venv is a folder of libraries pointing to one specific installed Python. It isolates libraries and specify their versions, while the **scripts** guarantee the Python version.
 
+`setup_once`: 
+1. Find a Python in the supported range (Windows: `py -0` lists installed, `py -3.12` picks one; Linux/Mac: try `python3.12`, `python3.13`, ...). None found → Offer `winget` (or some package manager method for linux) or point to python.org (Windows: tick "Add to PATH") and stop. 
+2. Build the venv with that Python. 
+3. Install pinned libraries + latest yt-dlp. 
+4. Check FFmpeg (and Deno if needed). Missing → ask whether to install (`winget` on Windows, `brew` on Mac). After installing, tell the user to reopen the terminal and run setup again. On Linux, print the `apt`/`sudo` command instead of running it. 
+
+`run`: 
+1. Venv missing, or its Python outside the range → rebuild it automatically. 
+2. `pip install -U yt-dlp` (not `yt-dlp -U`, which is for the standalone binary). No internet → warn and continue with the installed version. 
+3. Log the yt-dlp version (first suspect when downloads break), then start the program.
+
 ## 17. Maintenance & Hand-off
 
 `docs/HANDOFF.md` must include at least:
