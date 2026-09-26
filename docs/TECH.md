@@ -179,31 +179,34 @@ Plus downloads: ~4 s/song for audio, ~11 s/song for 720p video on this connectio
 
 - In method C, `hvideo_N.mp4` has **no audio on purpose**. It's the intermediate copy-joined video (`-map 0:v`) before the one-pass audio is muxed in to make `hybrid_N.mp4`. [known]
 
-**Audio normalization** — `scratch/spike_loudness.py`. 4 songs + 4 countdowns, target `I=-14 LUFS, TP=-1.5 dBTP, LRA=11`. Scored by the measured loudness of each segment's middle in the output:
+**Audio normalization** — `scratch/spike_loudness.py`. 4 songs + 4 countdowns; the loudnorm modes used target `I=-14 LUFS, TP=-1.5 dBTP, LRA=11`. Scored by the measured loudness of each segment's middle in the output:
 
 | Mode | Songs (LUFS) | Countdown (LUFS) | Spread | Extra time |
 | --- | --- | --- | --- | --- |
 | none | −5.4 … −10.9 | −28.1 | 22.7 LU | — |
-| peak to −1 dBFS (= moviepy `AudioNormalize`) | −6.4 … −11.9 | −14.1 | 7.7 LU | 4 s measuring |
+| **peak to −1 dBFS (= moviepy `AudioNormalize`) — CHOSEN** | **−6.4 … −11.9** | **−14.1** | **7.7 LU** | **~0.5 s measuring per clip** |
 | `loudnorm` single pass (dynamic) | −13.2 … −16.3 | −13.8 | 3.1 LU | +3 s render |
-| **`loudnorm` two-pass, `linear=true`** | **−14.2 … −14.8** | **−15.0** | **0.8 LU** | **~1.2 s measuring per clip** |
+| `loudnorm` two-pass, `linear=true` | −14.2 … −14.8 | −15.0 | 0.8 LU | ~1.2 s measuring per clip |
 
-- **Two-pass linear is the one to use.** Pass 1 measures each clip's exact trimmed range (`loudnorm=…:print_format=json -f null -`). Pass 2 is `loudnorm=…:measured_I=…:measured_TP=…:measured_LRA=…:measured_thresh=…:offset=…:linear=true`, placed in each segment's chain inside the one-pass graph, **before** `aresample=48000`, because loudnorm outputs 192 kHz. [found 2026-09-27]
+- **Chosen: peak normalization** (operator listening check, 2026-09-27). It sounded best: the music isn't pulled down, so the countdown doesn't pop out over it. The lowest LUFS spread isn't the goal here: evening loudness makes the quiet countdown as loud as the songs, and that stands out. **Hard-coded feature, no config key** (maintainer decision). [found]
+- Peak recipe: pass 1 runs `volumedetect` on each clip's exact trimmed (padded) range and reads `max_volume: X dB`. Gain = `−1.0 − X` dB. In that segment's chain, `volume=<gain>dB` goes before `aresample`. Songs near full scale move by ~1 dB; the countdown got about +14 dB. `scratch/spike_loudness.py` mode `peak`. [found]
+- Peak caveats: `volumedetect` reports **sample** peak rounded to 0.1 dB, not true peak. With 1 dB of headroom, small inter-sample overs after lossy encoding are possible but weren't heard. A clip with one loud transient gets little boost, which is the nature of peak normalization. [known]
+- Alternative tried, not chosen — two-pass loudnorm: Pass 1 measures each clip's exact trimmed range (`loudnorm=…:print_format=json -f null -`). Pass 2 is `loudnorm=…:measured_I=…:measured_TP=…:measured_LRA=…:measured_thresh=…:offset=…:linear=true`, placed in each segment's chain inside the one-pass graph, **before** `aresample=48000`, because loudnorm outputs 192 kHz. [found 2026-09-27]
 - Confirmed it really stayed linear (`normalization_type: linear`, one fixed gain, no pumping) for the countdown (+13 dB) and the songs. loudnorm quietly falls back to dynamic when a linear gain would break the true-peak limit, so check `normalization_type` from pass 2 and log it. [found]
 - The K-pop masters measured −5 to −8 LUFS with true peaks **above 0 dBTP** (+1.32, +0.37). The countdown is −27 LUFS. At −14 they're turned down 6–9 dB; a louder target means the countdown needs more boost and hits the true-peak limit sooner. [found]
 - Measuring can reuse the cache: a clip's measurement depends only on (file, start, end), so it can be cached next to the media. [known]
-- Output for a listening check: `workspace/spike/norm/norm_twopass.mp3` (compare `norm_none.mp3`). [not yet listened to by the operator]
+- Listening files: `workspace/spike/norm/norm_{none,peak,dyn,twopass}.mp3`. Operator verdict: **peak** best. [found 2026-09-27]
 
 **Maintainer decisions received 2026-09-27** (to be written into SPEC by the maintainer):
 - End time past song length **after download, within ~1 s**: **trim to fit, with a warning** (not a row error). Larger overruns are still caught at manifest stage by the metadata check (§9).
 - **JS runtime: not required.** Don't install or require Deno/Node unless yt-dlp actually breaks without one. Note: the tests in this spike ran with Node on PATH; the operator has since removed it from PATH.
 - Speed target: the numbers above are enough.
+- **Audio normalization: peak to −1 dBFS per clip, always on, hard-coded (not in the TOML schema).**
 
 **Open flags for the maintainer** (not decided here, per CLAUDE.md):
 1. **SPEC clarification needed — mirror.** The operator's intent has two modes: (a) **mirror everything**: rows marked already-mirrored in the sheet's "Mirrored แล้ว" column are left as they are, all others get `hflip`; (b) **leave as is**: nothing is flipped, whatever the column says. The current SPEC has only `processing.mirror = true/false` and doesn't mention the column, so it reads as "flip everything" or "flip nothing".
 2. **Download format/quality config** (SPEC §7 TODO): 720p cap + H.264 preference works (§9).
-3. **Normalization** is not in the SPEC §7 schema. Target loudness (−14 LUFS used here) and on/off would be new config keys, which is a schema change.
-4. **`tomli-w` pin:** 1.2.0 was installed for the test; `requirements.txt` is still empty.
+3. **`tomli-w` pin:** 1.2.0 was installed for the test; `requirements.txt` is still empty.
 
 ## 11. Findings log
 
@@ -212,7 +215,7 @@ Newest first. Date · what was tried · result · where it's now documented.
 | Date | Finding | Result | Documented in |
 | ---- | ------- | ------ | ------------- |
 | 2026-09-27 | TOML generate/read/write with tomli-w 1.2.0 | round trip exact; Windows `os.replace` fails on open file → retry; BOM rejected → `utf-8-sig` | §5 |
-| 2026-09-27 | Audio normalization, 4 modes | two-pass linear loudnorm: 0.8 LU spread (none 22.7, peak 7.7, dynamic 3.1) | §10 |
+| 2026-09-27 | Audio normalization, 4 modes + listening check | **peak chosen by ear** (hard-coded); two-pass loudnorm measured most even (0.8 LU) but pops the countdown out | §10 |
 | 2026-09-27 | `hvideo_6.mp4` silent | intended (intermediate video-only file of the hybrid join) | §10 |
 | 2026-09-26 | moviepy prototype vs this pipeline, same 5 songs | 605 s vs 104 s; prototype output 360p with audio 25 s short | §10 |
 | 2026-09-26 | Chunk + join: re-encode / copy-concat / hybrid | hybrid exact and ~10 % over one pass; copy-concat has 9–19 ms audio dropouts | §10 |
