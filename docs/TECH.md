@@ -69,7 +69,7 @@ Record answers in §11 Findings log, then update the relevant section below.
 - TOML writers drop comments and may reorder keys → comments live only in `config/example.toml`. [known]
 - Unsaved edits on GUI close: save or prompt (see SPEC §7).
 - Tested 2026-09-27 with `tomli-w 1.2.0` (installed in the venv; **not yet added to `requirements.txt`**, since pins need the maintainer). Script: `scratch/spike_toml.py`. All results [found]:
-  - Defaults for exactly the SPEC §7 keys generate on first run and read back identically. Round trip is exact for Thai text, Windows backslash paths (written escaped, e.g. `"D:\งานเต้น\…"`), `[]()&`, URL queries, and floats like `0.1`. Table and key order are kept (dict order).
+  - Defaults for exactly the SPEC §7 keys generate on first run and read back identically. Round trip is exact for Thai text, Windows backslash paths (written escaped, e.g. `"D:\\งานเต้น\\…"`), `[]()&`, URL queries, and floats like `0.1`. Table and key order are kept (dict order).
   - Comments are dropped on write (as expected).
   - `None` is not a TOML value. `tomli_w.dumps` raises `TypeError` **before** the disk is touched. Empty string / empty list are fine, so use those for "unset".
   - A hand-edited broken file gives `TOMLDecodeError: Invalid value (at line 2, column 10)`. Wrap it in a project error and show the position to the operator.
