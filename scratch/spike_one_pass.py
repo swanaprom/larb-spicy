@@ -48,12 +48,24 @@ def duration(path: Path) -> float:
     return float(probe(path)["format"]["duration"])
 
 
-def build(segments, out: Path, video: bool, mirror: bool, d: float, acodec: list[str]):
-    """segments: list of (path, start, end, is_countdown). end=None -> whole file."""
+def build(segments, out: Path, video: bool, mirror: bool, d: float, acodec: list[str],
+          pad: float = 0.0):
+    """segments: list of (path, start, end, is_countdown). end=None -> whole file.
+
+    pad: extend each SONG clip by this many seconds on both sides, clamped to
+    [0, real file length]. Countdowns are never padded.
+    """
     args, vf, af = [], [], []
     durs = []
     for i, (path, start, end, is_cd) in enumerate(segments):
-        dur = (end - start) if end is not None else duration(path) - start
+        real = duration(path)
+        if end is None:
+            end = real
+        if end > real:  # FFmpeg would exit 0 with corrupt output (TECH §10)
+            raise SystemExit(f"segment {i}: end {end}s past real length {real:.3f}s of {path.name}")
+        if pad and not is_cd:
+            start, end = max(0.0, start - pad), min(real, end + pad)
+        dur = end - start
         durs.append(dur)
         # Input-side seek + -t: accurate when re-encoding, and avoids decoding the whole song.
         args += ["-ss", f"{start:.3f}", "-t", f"{dur:.3f}", "-i", str(path)]
@@ -66,6 +78,10 @@ def build(segments, out: Path, video: bool, mirror: bool, d: float, acodec: list
                       f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS},format=yuv420p"
                       f"{flip},setpts=PTS-STARTPTS[v{i}]")
 
+    if len(segments) == 1:  # no joins -> just rename the streams
+        af.append("[a0]anull[aout]")
+        if video:
+            vf.append("[v0]null[vout]")
     # Audio chain: acrossfade needs no durations.
     prev = "a0"
     for i in range(1, len(segments)):
@@ -81,18 +97,23 @@ def build(segments, out: Path, video: bool, mirror: bool, d: float, acodec: list
             length += durs[i] - d
             prev = nxt
 
-    graph = ";".join(vf + af)
-    args += ["-filter_complex", graph, "-map", "[aout]"]
+    # Graph goes in a file: the command line would pass Windows' 32 767-char limit at ~50 songs.
+    graph_file = out.with_suffix(out.suffix + ".graph.txt")
+    graph_file.write_text(";\n".join(vf + af), encoding="utf-8")
+    args += ["-/filter_complex", str(graph_file)]
     if video:
-        args += ["-map", "[vout]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
-    args += [*acodec, str(out)]
+        # yuv420p on OUTPUT: xfade otherwise negotiates yuv444p ("High 4:4:4"), which
+        # Windows' built-in players can't decode. Video mapped first = player-friendly.
+        args += ["-map", "[vout]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                 "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+    args += ["-map", "[aout]", *acodec, str(out)]
     expected = sum(durs) - d * (len(durs) - 1)
     dt = ffrun(args)
     info = probe(out)
     print(f"-> {out.name}: took {dt:.1f}s, expected {expected:.3f}s, got format {float(info['format']['duration']):.3f}s")
     for s in info["streams"]:
         print(f"   stream {s['codec_type']}: {s.get('duration')}")
-    return dt
+    return dt, expected, durs
 
 
 if __name__ == "__main__":

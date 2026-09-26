@@ -5,34 +5,32 @@ Pulls the raw table from test_google_api.py and cleans it up into a
 manifest-ready nested list:
 
 1. Drops the first row (header/titles).
-2. Column index 3 (5th... wait, "4th column" = index 3): normalizes any
+2. Column index 2 (3rd column, "URLs"): normalizes any
    YouTube URL variant (youtu.be, watch?v=, with tracking/trailing junk)
    into the canonical "https://www.youtube.com/watch?v=<ID>" form.
    Rows with an unparsable link are dropped, with a warning.
-3. Column index 4 (5th column): parses a timestamp range like
+3. Column index 3 (4th column, "ช่วงเวลา"): parses a timestamp range like
    "0.48 - 1.13", "0:48-1:13", "0.48 - 1:13", etc. into total seconds,
    and EXPANDS it into two columns: [start_seconds, end_seconds],
-   pushing whatever was in the old 6th column (and beyond) one slot to
+   pushing whatever was in the old 5th column (and beyond) one slot to
    the right instead of overwriting it. Rows with an unparsable
    timestamp are dropped, with a warning.
 
 Column indexing recap (0-based) BEFORE this script touches anything:
     0: col 1
     1: col 2
-    2: col 3
-    3: col 4  <- YouTube URL
-    4: col 5  <- timestamp range ("start - end")
-    5: col 6  <- whatever else was already there
+    2: col 3  <- YouTube URL
+    3: col 4  <- timestamp range ("start - end")
+    4: col 5  <- whatever else was already there
     ...
 
 AFTER processing:
     0: col 1
     1: col 2
-    2: col 3
-    3: col 4  <- normalized YouTube URL
-    4: col 5  <- start time, in seconds
-    5: col 6  <- end time, in seconds
-    6: col 7  <- (old col 6, shifted right)
+    2: col 3  <- normalized YouTube URL
+    3: col 4  <- start time, in seconds
+    4: col 5  <- end time, in seconds
+    5: col 6  <- (old col 5, shifted right)
     ...
 """
 
@@ -41,8 +39,9 @@ import sys
 
 from test_google_api import GOOGLE_SHEET_URL, GID_OVERRIDE, get_sheet_as_table
 
-YOUTUBE_COLUMN_INDEX = 3   # 4th column
-TIMESTAMP_COLUMN_INDEX = 4  # 5th column
+# 2026-09 sheet layout: ชื่อเพลง, ศิลปิน, URLs, ช่วงเวลา, ผู้เสนอเพลง + ชั้นปี, Mirrored แล้ว, หมายเหตุ
+YOUTUBE_COLUMN_INDEX = 2   # 3rd column ("URLs")
+TIMESTAMP_COLUMN_INDEX = 3  # 4th column ("ช่วงเวลา")
 
 # Matches an 11-char YouTube video ID after v=, youtu.be/, embed/, or shorts/,
 # regardless of what junk (tracking params, playlist refs, trailing slashes,
@@ -83,7 +82,9 @@ def parse_timestamp_range(raw_range: str):
     if not raw_range:
         return None
 
-    match = _TIMESTAMP_RANGE_RE.match(raw_range.strip())
+    # People type stray spaces inside numbers ("1. 04", "0.4 6-1:3 0"), so
+    # drop ALL whitespace before matching, not just the ends.
+    match = _TIMESTAMP_RANGE_RE.match(re.sub(r"\s+", "", raw_range))
     if not match:
         return None
 

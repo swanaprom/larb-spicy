@@ -30,7 +30,7 @@ import requests
 # Constant: paste the normal "shareable" Google Sheet URL here.
 # Example: https://docs.google.com/spreadsheets/d/1AbCDEfGhIjKlMnOpQrStUvWxYz/edit#gid=0
 # ---------------------------------------------------------------------------
-GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1p__bbjYx4z0oqFY8Vc98rLnn6i0pn1VbP9GNNYhuRWY/edit?gid=0#gid=0"
+GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1zGVp4IefmFykJjLN_Yvz904h7J5J1HEkYuGUFB4Bj4A/edit?gid=0#gid=0"
 
 # Optional: force a specific tab's gid instead of whatever gid (if any) is
 # embedded in GOOGLE_SHEET_URL. Each tab in a spreadsheet has its own gid --
