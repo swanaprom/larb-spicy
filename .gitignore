@@ -36,4 +36,4 @@ desktop.ini
 *.mp3
 *.wav
 *.part
-# !tests/fixtures/**
+!tests/fixtures/**
