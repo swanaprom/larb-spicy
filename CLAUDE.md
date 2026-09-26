@@ -4,7 +4,7 @@ Random Dance combiner: downloads a list of YouTube songs (only the given time ra
 
 ## Current phase
 
-**SPIKE** — throwaway exploration. Work only in `scratch/` on a `spike/*` branch. This code will be deleted, never merged. Its only output that matters is what you record in `docs/TECH.md`.
+**SPIKE** — throwaway exploration. Work only in `scratch/` on a `spike` branch. This code will be deleted, never merged. Its only output that matters is what you record in `docs/TECH.md`.
 
 _(Maintainer updates this section when the phase changes: spike → skeleton → slice N.)_
 
@@ -24,6 +24,7 @@ _(Maintainer updates this section when the phase changes: spike → skeleton →
 
 - Never commit to `main`. Never merge. Work on a branch per slice.
 - Small, focused commits. At the end, report: what changed, what was verified, what was **not** verified.
+- Commit doc changes separately from code changes.
 
 ## Architecture (hexagonal) — the most important rules
 
