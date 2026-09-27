@@ -34,9 +34,9 @@ Keep this current — a future non-technical maintainer will live here.
 |---|---|
 |Manifest|The parsed, validated table derived from the Google Sheet, used to drive the pipeline|
 |Countdown|Intro video/audio clip inserted before each song|
-|Cache|Previously-downloaded media kept on disk keyed by `videoID_songtitle_artist` to survive interrupted runs|
+|Cache|Previously-downloaded media kept on disk, named by video ID and type (e.g. `abc123_audio`, `abc123_v720`), so reruns and interrupted runs don't download again (§10)|
 |Row error|A row that can't be used safely and is skipped, with a reported reason (e.g. unavailable video, bad or out-of-range time range, download still failing after retries)|
-|Row warning|A manifest row with a non-critical issue (e.g. missing "Song Name") that still runs|
+|Row warning|A row with a non-critical issue (e.g. missing artist) that still runs|
 |Padding|Each song is taken 1 s earlier and 1 s later than its sheet time range (clamped to the song's real start/end), so the crossfade doesn't eat into the part the dancers need|
 |File-only setting|A config key that exists only in `config.toml` and is never shown in the GUI. For maintainers who have re-tested a change, not for operators (§7)|
 |Peak normalization|Each clip's loudest point is raised or lowered to the same level (−1 dBFS), so quiet countdowns and loud songs sit together without flattening the music|
@@ -46,20 +46,26 @@ Keep this current — a future non-technical maintainer will live here.
 A short narrative + a diagram (even ASCII) beats prose alone here, since this is the thing that decays fastest in your memory between sessions.
 
 ```
-[setup_once] --> [run] --> [GUI]
+[setup_once] --> [run] --> [GUI / CLI]
 
-[GUI] --(config edits)--> [TOML settings file] <--(load once per run)-- [Core Orchestrator]
+[GUI / CLI] --(sheet URL, countdown, settings edits)--> [Core]
 
-[GUI] --(sheet URL, countdown URL/file, row range)--> [Core Orchestrator]
+Core (standard library only: rules, orchestration, decisions)
+  ├─ manifest rules (§8), mirror rule, padding, peak gain
+  ├─ cache key + cache check (§10)
+  ├─ parallel downloads + retries
+  └─ talks to the outside world ONLY through five ports:
 
-Core Orchestrator
-  ├─ Config Manager      -> call config reader/writer port (TOML) 
-  ├─ Sheet Fetcher       -> call raw rows fetcher port
-  ├─ Manifest Builder    -> validated manifest (+ row errors/warnings)
-  ├─ Downloader          -> call downloader port (yt-dlp) + cached media files
-  ├─ Media Processor     -> call helper to trim / mirror / crossfade (FFmpeg)
-  └─ Logger              -> signal observer to stream to GUI
+  Port              What the core asks for                    Adapter (today)
+  ───────────────   ───────────────────────────────────────   ─────────────────────────
+  SettingsStore     load / save settings                      TOML file (tomllib + tomli-w)
+  SongListSource    rows of the song list                     Google Sheet CSV export / local CSV
+  MediaSource       look up a video's info · download it      yt-dlp
+  MediaProcessor    measure a clip · render the compilation   FFmpeg (the one FFmpeg helper lives here)
+  EventSink         report progress, warnings, errors         console now, GUI later
 ```
+
+Adapters can be replaced without touching the core, as long as the port stays the same. Port signatures change only with the maintainer's approval (CLAUDE.md).
 
 **Module boundary rule (maintainability keystone):** the GUI never touches yt-dlp/FFmpeg directly, and the core never imports GUI code. If you can't unit-test a core module without spinning up the GUI, the boundary has leaked.
 
@@ -71,7 +77,7 @@ Core Orchestrator
 |---|---|---|
 |Language|Python 3.11–3.13 (tested range)|Pinned as a range, not loose: the venv can't upgrade its own Python, and a new Python can break pinned libraries. 3.11 is also the floor for `tomllib`. Range lives in one file read by both scripts (§16)|
 |Video/audio download|`yt-dlp` (always latest, not pinned)|replaces `moviepy` download path from prototype. The only unpinned dependency — see §16|
-|FFmpeg binary|pip-bundled binary (`static-ffmpeg`)|Make it env-bounded, can pin working version, just have system-bound existence and version check (4.3 and newer), in case the library's repo failed to fetch, and prompt operator to download FFmpeg if it's needed. (Reduced friction)|
+|FFmpeg binary|pip-bundled binary (`static-ffmpeg`), **FFmpeg 7.1 or newer**|Lives in the venv, pinned with it, no admin rights needed. Fallback: a system FFmpeg, if it's 7.1 or newer; else prompt the operator to install one. Why 7.1: long song lists need an option only 7.1+ has, and one version rule means one tested code path. An older FFmpeg stops the run with a clear "too old" message|
 |JS runtime (Deno / Node)|**Not required** — add only if yt-dlp actually breaks without one|2026-09 spike: downloads work without one (yt-dlp prints a deprecation warning). Node also works if passed explicitly. If it ever becomes necessary, same handling as system-bound FFmpeg (check + ask). Note kept in HANDOFF.md|
 |Trim / mirror / crossfade|FFmpeg via `subprocess`, through one internal helper module; **whole compilation rendered in one pass**|Helper owns every FFmpeg call, keeps binary path separate from the argument list. One pass confirmed in the spike (exact lengths, A/V in sync). Very long video lists are rendered in chunks and joined without re-encoding (TECH §10)|
 |GUI framework|Tkinter (`ttk`)|Zero dependencies (nothing to pin, nothing that can vanish from PyPI), most examples for AI-assisted successors, and enough styling (colors, fonts, log tags) for the actual UI. Rejected: Qt/PySide6 (heavy + licensing questions), CustomTkinter (third-party, risks lagging a Python bump), PySimpleGUI (now needs a license key).|
@@ -83,23 +89,27 @@ Core Orchestrator
 
 Write the actual schema, not just "it's configurable." This is the contract between GUI and core.
 
+The live file is `config/config.toml` (gitignored). On first run it's created from `config/example.toml`, comments included. It deliberately does **not** live in `workspace/`, since that folder gets deleted to free space and settings shouldn't go with it.
+
 Keys marked **file-only** are never shown in the GUI. They hold values chosen by testing (see TECH.md); change them only after re-testing.
 
 ```toml
 [output]
-directory = ""
-filename_template = ""   # {date}_{time}.mp4 — date + time only, no event name (ordering by time is sufficient; keeps the GUI uncramped)
+directory = ""           # empty = workspace/output/. The operator may choose any folder.
+filename_template = ""   # empty = {date}_{time}. Only {date} and {time} are allowed (no event name:
+                         # ordering by time is enough and keeps the GUI uncramped). No extension:
+                         # the program appends .mp4 or .mp3. Never overwrites an existing file.
 
 [countdown]
 default_urls = []
 default_files = []
 
 [download]
-cache_directory = ""
+cache_directory = ""     # empty = workspace/cache/. The operator may choose any folder.
 max_parallel_downloads = 3   # file-only. Tested best for video; more is slower on a full connection (TECH §9)
 max_retries = 2              # file-only. Retries per song before it becomes a row error (TECH §9)
 max_height = 720             # file-only. Largest video height to download, in pixels (720 = "720p").
-                             # Also sets the output height, so video is never upscaled.
+                             # Also the output height: output is never taller than this. Even number, 144–4320.
 # Codec preference when downloading (prefer H.264) is hard-coded in the downloader adapter:
 # it depends on what each download tool can do, and H.264 is also much faster to render (TECH §9).
 # TODO: timeout — yt-dlp has its own network timeout/retry options; decide in the downloader slice whether they're enough.
@@ -107,7 +117,7 @@ max_height = 720             # file-only. Largest video height to download, in p
 [processing]
 audio_only = true
 mirror = false                   # two modes, see §8 "Mirror rule"
-crossfade_duration_seconds = 1.0
+crossfade_duration_seconds = 1.0 # above 0, at most 10. There is no "no crossfade" option by design.
 # Deliberately NOT configurable (hard-coded):
 # - Audio normalization: always on, peak to −1 dBFS (§9).
 # - Output video format: H.264, standard 4:2:0 color, 30 fps, height = download.max_height.
@@ -145,7 +155,7 @@ Current sheet layout (2026-09), in order: `ชื่อเพลง` (song title
 |URLs|Yes|video must exist and be available (checked by fetching its info from YouTube, no download)|row error, skip row, report reason|
 |Song title|No|—|row warning, included anyway|
 |Artist|No|—|row warning, included anyway|
-|Time range|Yes|parses to start < end (stray spaces people type inside numbers are ignored); **end ≤ the video's length on YouTube**|row error, skip row, report reason|
+|Time range|Yes|`m:ss-m:ss` or `h:mm:ss-h:mm:ss`; `.` is accepted as the separator, since people type it; any dash type (`-`, `–`, `—`, as phones insert). Stray spaces inside numbers are ignored. Seconds must be two digits (`1.5` is ambiguous). start < end, and **end ≤ the video's length on YouTube**|row error, skip row, report reason|
 |Mirrored แล้ว|No|empty or only spaces = not mirrored yet; anything else (any text or symbol) = already mirrored|— (used by the Mirror rule below)|
 
 Note: because the URL and length checks ask YouTube, building the manifest needs internet and takes roughly 0.5–3 s per row. It still happens before any download, so a bad row never costs a download.
@@ -169,17 +179,19 @@ Turn your numbered usage scenario into a state machine / stage list with **input
 |Stage|Input|Output|Failure behavior|
 |---|---|---|---|
 |1. Lock settings|(run start signal?)|settings frozen for this run|—|
-|2. Fetch sheet|Sheet URL, row range (or just plain CSV if it fails to use the live fetch)|raw rows|sheet unreachable/private, or a `[sheet.columns]` header not found → abort run with clear message (ties to Non-Goal in §3)|
+|2. Fetch sheet|Sheet URL, row range (or just plain CSV if it fails to use the live fetch)|raw rows|sheet unreachable/private (e.g. HTTP 401: asks whether it's shared as "Anyone with the link"), or a `[sheet.columns]` header not found (names the missing header and lists the ones found) → abort run before any download. Both verified against Google (TECH §4)|
 |3. Build manifest|raw rows + video info from YouTube (no download)|validated manifest + per-row errors/warnings|see §8|
 |4. Download countdown|countdown URL/file or default|cached countdown media|Use same retry policy as the row below.|
 |5. Download songs|manifest URLs|cached song media|skip if already cached (resume-safe). Up to `max_parallel_downloads` at once; retry each up to `max_retries` times, then row error.|
-|6. Check & measure|cached media, time ranges|real length + loudness peak of each clip|YouTube's length is rounded to whole seconds, so the real file is re-checked. End time past the real length by **about 1 s or less → trim to fit, row warning**. More than that → row error, skip|
-|7. Render (one pass)|countdown + songs in sequence, settings|final output file|Trim with padding, mirror (per §8 Mirror rule), peak normalization (always on), crossfades and countdowns all in one FFmpeg run. Protocol: if a specific song is known bad, warn and skip it; don't kill the whole compilation|
+|6. Check & measure|cached media, time ranges|real length + loudness peak of each clip|YouTube's length is rounded to whole seconds, so the real file is re-checked. End time past the real length by **about 1 s or less → trim to fit, row warning**. More than that → row error, skip. A (nearly) silent clip (peak ≤ −60 dB) gets no volume boost and a row warning|
+|7. Render (one pass)|countdown + songs in sequence, settings|final output file|Trim with padding, mirror (per §8 Mirror rule), peak normalization (always on), crossfades and countdowns all in one FFmpeg run. Protocol: if a specific song is known bad, warn and skip it; don't kill the whole compilation. **Planned (slice 1):** the last song fades out at the end, audio and video, over the crossfade duration (hard-coded, no setting)|
 |8. Unlock GUI|(run end signal?)|settings GUI and TOML editable again|—|
 
 ## 10. Caching Strategy
 
-- Cache key: `videoID_songtitle_artistname` — Not including index in case the order change but the song is cached, videoID is a unique key already, the last two are for human.
+- Cache key: `{videoID}_{audio|v<max_height>}`, e.g. `abc123_audio`, `abc123_v720`. The ID alone identifies the video; the suffix separates audio-only from video downloads, so each mode downloads its own file once. The `v` number is the `max_height` setting, not the file's real height, so changing that setting never reuses a lower-quality file.
+    - No title or artist in the key: titles can contain characters Windows forbids in filenames, and fixing a typo on the sheet would otherwise cause a re-download. Titles appear in the logs instead.
+    - The manual-download naming rule (for dropping a file into the cache by hand) is in HANDOFF.md.
 - Cache location: from `[download]`. Default under `workspace/cache/` (gitignored, §15).
 - Invalidation: cache never expires on its own. After each run the operator is asked whether to clear it, since that depends on their machine (plenty of disk and quick iteration, or very limited space). A clear-cache button is also always available in the GUI.
 
@@ -195,6 +207,7 @@ Where files land, naming convention, and whether intermediate files (per-song tr
 
 - Git management: all generated data (downloads, cache, intermediates, outputs, logs) lives under `workspace/`, which is gitignored. Nothing generated ever goes into git (§15).
 - Output formats: video `.mp4` (format fixed in §7), audio-only `.mp3`.
+- Default folders are inside `workspace/` (`output/`, `cache/`, plus a temporary work folder); they're recreated if missing. The operator may point output and cache anywhere (§7).
 
 ## 13. Coding Standards
 
@@ -204,7 +217,7 @@ Write these down explicitly — this is the section that actually protects "pass
 - Docstrings: Google-style convention, stick to it.
 - No GUI imports in core modules (§5).
 - Config is read once per run, not polled, and written once at run start (§7) — comment this in code, not just here.
-- Testing (minimum, decided): one smoke test using 2–3 tiny fixture clips in `tests/fixtures/` — trim/crossfade them offline, check the output exists. No downloading. This is the baseline guard: must pass before any merge to `main`.
+- Testing (minimum, decided): smoke tests using the tiny clips in `tests/fixtures/`, with fake song-list and media sources and the real FFmpeg processor. Fully offline: no downloading, no YouTube, no sheet. They check the output **length** against the plan, not just that a file exists, since FFmpeg can succeed while producing a broken file. Standard-library `unittest`, so nothing extra to pin. Must pass before any merge to `main`.
 - TODO: testing beyond the smoke test — maybe unit test per module? (each module eats input and vomits the expected outcome)
 
 **Development lifecycle: spec-driven, iterative, in thin vertical slices.**
@@ -230,7 +243,7 @@ Running list — append here instead of losing the thought between sessions.
 
 - Code → in git.
 - Data (videos, cache, outputs, logs) → never in git; lives in `workspace/` (gitignored).
-- Config → committed template `config/example.toml` (Used as reference of how it should be generated); the real `config.toml` is gitignored because each generation fills in its own. So it needs to generate default value in first run.
+- Config → committed template `config/example.toml`; the live `config/config.toml` is gitignored because each generation fills in its own, and it's generated from the template on first run (§7).
 - Credentials (e.g. Google service account JSON) → never committed, not even once. Explain in README where to get one.
 
 Layout:
@@ -246,16 +259,20 @@ larb-spicy/
 ├── <python range file>   # single source of truth for supported Python
 ├── setup_once.bat / .sh
 ├── run.bat / .sh
-├── config/example.toml
-├── src/                  # manifest, download, render, cli ...
-├── tests/fixtures/       # tiny clips for the smoke test
+├── config/example.toml   # committed template
+├── config/config.toml    # live settings, gitignored
+├── src/larb/core/        # rules + orchestration, ports, models, errors (stdlib only)
+├── src/larb/adapters/    # TOML, sheet, yt-dlp, FFmpeg, console
+├── src/larb/cli.py       # entry point: python -m larb <sheet> --countdown <file>
+├── tests/                # offline tests
+├── tests/fixtures/       # tiny clips for the tests
 └── workspace/            # gitignored
 ```
 
 Git workflow:
 
 - `main` = known-good, always runs. Nothing lands on `main` without the smoke test passing.
-- Claude Code works only on branches (`git switch -c <feature>` at the start of every session). Merging is a deliberate human act.
+- **One branch per slice**, named after what it does (e.g. `skeleton`, `fade-out`, `gui`), created from an up-to-date `main`. Claude Code works only on that branch. Merging is a deliberate human act; the branch is deleted after merging.
 - Known-good releases are tagged with CalVer (`<year>.<index>`), so successors can always fall back to one.
 - `.gitignore` is written before the first commit (`workspace/`, `config.toml`, credentials, `.venv/`, `CLAUDE.local.md`).
 
@@ -280,7 +297,7 @@ Key fact: a venv is a folder of libraries pointing to one specific installed Pyt
 1. Find a Python in the supported range (Windows: `py -0` lists installed, `py -3.12` picks one; Linux/Mac: try `python3.12`, `python3.13`, ...). None found → Offer `winget` (or some package manager method for linux) or point to python.org (Windows: tick "Add to PATH") and stop.
 2. Build the venv with that Python.
 3. Install pinned libraries + latest yt-dlp.
-4. Get FFmpeg: trigger the `static-ffmpeg` download now (about 45 s and 200 MB the first time), so the first real run doesn't stall. If that fails → use system FFmpeg if it's new enough → else ask whether to install it (`winget` on Windows, `brew` on Mac; on Linux, print the command). After installing, tell the user to reopen the terminal and run setup again.
+4. Get FFmpeg: trigger the `static-ffmpeg` download now (about 45 s and 200 MB the first time), so the first real run doesn't stall. If that fails → use system FFmpeg if it's 7.1 or newer → else ask whether to install it (`winget` on Windows, `brew` on Mac; on Linux, print the command). After installing, tell the user to reopen the terminal and run setup again.
 
 `run`:
 
