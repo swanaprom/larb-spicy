@@ -10,7 +10,10 @@ from pathlib import Path
 from larb.adapters.ffmpeg.helper import run_tool
 from larb.core.errors import MediaToolMissingError
 
-MIN_VERSION = (4, 3)  # xfade was added in FFmpeg 4.3
+# 7.1 is where "-/filter_complex <file>" appeared, which the renderer needs (the graph is
+# too long for the command line). Older versions are refused with a clear message instead
+# of keeping an untested fallback (maintainer decision, TECH §3). xfade itself needs 4.3.
+MIN_VERSION = (7, 1)
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,13 @@ def _read_version(ffmpeg: Path) -> tuple[str, tuple[int, int] | None]:
     return text, (int(match.group(1)), int(match.group(2))) if match else None
 
 
+def _new_enough(version: tuple[int, int] | None) -> bool:
+    # None = the version text has no number (development builds such as "N-12345-g...").
+    # Those are built from current FFmpeg sources, so they are accepted; if one ever lacks
+    # a feature, FFmpeg itself fails loudly and the run stops with a RenderError.
+    return version is None or version >= MIN_VERSION
+
+
 def _static() -> tuple[Path, Path]:
     from static_ffmpeg import run  # imported here: only this adapter may know about it
     # static-ffmpeg prints download progress on stdout; keep it out of our console.
@@ -42,23 +52,30 @@ def find_ffmpeg() -> FfmpegTools:
     """Return FFmpeg and ffprobe, preferring the pinned static-ffmpeg binaries.
 
     Raises:
-        MediaToolMissingError: Neither static-ffmpeg nor a new-enough system FFmpeg works.
+        MediaToolMissingError: Neither static-ffmpeg nor a system FFmpeg of at least
+            MIN_VERSION works.
     """
     problems = []
     try:
         ffmpeg, ffprobe = _static()
         text, version = _read_version(ffmpeg)
-        return FfmpegTools(ffmpeg, ffprobe, "static-ffmpeg", text, version)
     except Exception as e:  # any failure here just means "try the system one"
         problems.append(f"static-ffmpeg: {e}")
+    else:
+        if _new_enough(version):
+            return FfmpegTools(ffmpeg, ffprobe, "static-ffmpeg", text, version)
+        problems.append(f"static-ffmpeg {text} is too old")
 
     # shutil.which only *finds* the system binary; it is still called by full path.
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if ffmpeg and ffprobe:
         text, version = _read_version(Path(ffmpeg))
-        if version is None or version >= MIN_VERSION:
+        if _new_enough(version):
             return FfmpegTools(Path(ffmpeg), Path(ffprobe), "system", text, version)
-        problems.append(f"system FFmpeg {text} is older than {MIN_VERSION[0]}.{MIN_VERSION[1]}")
+        problems.append(f"system FFmpeg {text} ({ffmpeg}) is too old")
     else:
         problems.append("no system FFmpeg found")
-    raise MediaToolMissingError("FFmpeg not found. Run setup_once again.\n  - " + "\n  - ".join(problems))
+    needed = f"{MIN_VERSION[0]}.{MIN_VERSION[1]}"
+    raise MediaToolMissingError(f"No usable FFmpeg: version {needed} or newer is needed. "
+                                "Run setup_once again, or update the system FFmpeg.\n  - "
+                                + "\n  - ".join(problems))

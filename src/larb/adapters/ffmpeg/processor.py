@@ -23,7 +23,6 @@ VIDEO_ARGS = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
               "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
 VIDEO_AUDIO_ARGS = ["-c:a", "aac", "-b:a", "192k"]
 MP3_ARGS = ["-c:a", "libmp3lame", "-b:a", "192k"]
-SCRIPT_FILE_OPTION_VERSION = (7, 1)  # "-/filter_complex <file>" exists from FFmpeg 7.1
 
 
 def _width_for(height: int) -> int:
@@ -116,14 +115,11 @@ class FfmpegProcessor(MediaProcessor):
             args += ["-ss", f"{seg.start_s:.3f}", "-t", f"{seg.duration_s:.3f}", "-i", str(seg.path)]
 
         # The graph goes in a file: on the command line it would pass Windows'
-        # 32,767-character limit at around 50 songs (TECH §3).
+        # 32,767-character limit at around 50 songs (TECH §3). "-/option <file>" reads the
+        # option's value from a file (FFmpeg 7.1+, guaranteed by locate.MIN_VERSION).
         graph_file = self._work_dir / f"{output_path.stem}.graph.txt"
         graph_file.write_text(self._graph(plan), encoding="utf-8")
-        version = self._tools.version
-        if version is None or version >= SCRIPT_FILE_OPTION_VERSION:
-            args += ["-/filter_complex", str(graph_file)]
-        else:
-            args += ["-filter_complex_script", str(graph_file)]
+        args += ["-/filter_complex", str(graph_file)]
 
         if plan.audio_only:
             args += ["-map", "[aout]", *MP3_ARGS]
