@@ -4,24 +4,7 @@ Random Dance combiner: reads a song list from a Google Sheet, downloads the YouT
 
 ## Current phase
 
-**SLICE 2 — speed**, branch `slice-2-speed`. No port changes expected; if one turns out to be needed, propose it and stop.
-
-Scope:
-
-1. **Look up each video only once.** Today each song's info is fetched twice: once while building the manifest, once again at download (about 2 s extra per song). The yt-dlp adapter should remember what it looked up and reuse it when downloading. This stays inside the adapter; the core and the port don't change. If remembered info can go stale or fail (e.g. expired download links), fall back to a fresh lookup and record when that happens.
-2. **Run the manifest look-ups in parallel**, like downloads. Use `max_parallel_downloads` as the limit, so no new config key. Look-ups get the same retry policy as downloads (`max_retries`).
-   - Results, row errors and warnings must still be **reported in sheet order**, even though they're checked out of order.
-3. **Progress during look-ups.** Emit a progress event per row (e.g. "checking 12/40"), so a long list doesn't look frozen. The future GUI will show these.
-4. **Long lists: measure first, then stop and report.** SPEC §6 says very long video lists are rendered in chunks and joined (the hybrid method in TECH §10), but this isn't built yet. Before building anything, render a long list in one pass (at least 60 songs; reusing cached songs with different time ranges is fine) and report time, memory use, and whether it succeeded. **Then stop.** The maintainer decides whether chunking is needed.
-
-Acceptance:
-
-1. **Single lookup:** in a live run, the log shows each song's info fetched once. Report the time saved per song.
-2. **Parallel look-ups:** measure the manifest stage one-at-a-time vs in parallel, on the live sheet and on a longer list of at least 10 different videos (a local CSV built from videos already used in the spike is fine). Report both.
-   - An offline test (fake media source, with delays and some failing rows) checks that the results come out in sheet order, with the right row errors on the right rows.
-3. **Progress:** the console shows progress during look-ups, and an offline test checks one event per row.
-4. **Long-list measurement** reported as above. No chunking code yet.
-5. **No regressions:** all tests pass; one live audio and one live video run succeed against the sheet, with output length matching the plan; end-to-end time is no worse than slice 1.
+No active slice.
 
 How every slice works:
 1. Work only on the slice's branch, created from an up-to-date `main`.
