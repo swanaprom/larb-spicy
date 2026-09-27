@@ -1,0 +1,5 @@
+# Exact == pins only. yt-dlp is deliberately NOT listed here: it must always be the
+# latest version, so the setup/run scripts install it separately with `pip install -U yt-dlp`.
+# Do not add yt-dlp to this file (SPEC §15, §16).
+static-ffmpeg==3.0
+tomli-w==1.2.0

@@ -1,0 +1,38 @@
+[output]
+directory = ""
+filename_template = ""   # {date}_{time}.mp4 — date + time only, no event name (ordering by time is sufficient; keeps the GUI uncramped)
+
+[countdown]
+default_urls = []
+default_files = []
+
+[download]
+cache_directory = ""
+max_parallel_downloads = 3   # file-only. Tested best for video; more is slower on a full connection (TECH §9)
+max_retries = 2              # file-only. Retries per song before it becomes a row error (TECH §9)
+max_height = 720             # file-only. Largest video height to download, in pixels (720 = "720p").
+                             # Also sets the output height, so video is never upscaled.
+# Codec preference when downloading (prefer H.264) is hard-coded in the downloader adapter:
+# it depends on what each download tool can do, and H.264 is also much faster to render (TECH §9).
+# TODO: timeout — yt-dlp has its own network timeout/retry options; decide in the downloader slice whether they're enough.
+
+[processing]
+audio_only = true
+mirror = false                   # two modes, see §8 "Mirror rule"
+crossfade_duration_seconds = 1.0
+# Deliberately NOT configurable (hard-coded):
+# - Audio normalization: always on, peak to −1 dBFS (§9).
+# - Output video format: H.264, standard 4:2:0 color, 30 fps, height = download.max_height.
+#   H.264 in this form is the only format guaranteed to play in Windows' built-in players
+#   without extra installs (the spike found a 4:4:4 variant that won't play, TECH §10).
+# - Audio-only output: .mp3.
+
+[sheet.columns]
+# file-only. Maps each field to the sheet's column HEADER NAME (not position), so inserting
+# or reordering columns doesn't break parsing. A header that isn't found aborts the run, naming it.
+# Only the sheet adapter uses this, to turn rows into manifest fields; the core never sees column names.
+song_title = "ชื่อเพลง"
+artist     = "ศิลปิน"
+url        = "URLs"
+time_range = "ช่วงเวลา"
+mirrored   = "Mirrored แล้ว"
