@@ -136,6 +136,30 @@ Measured 2026-09-26 with yt-dlp 2026.08.19, one song (`oKBwWQI-IoI`, 162 s), cli
 - Suggested default: **2 parallel downloads**. That gets most of the video gain, with less strain on YouTube than 5. Nothing else is decided here: the worker count is not in the SPEC §7 schema, so it's either hard-coded or a maintainer schema change. [found → maintainer]
 - For comparison, the moviepy prototype also used 5 workers.
 
+**Parallel downloads matrix: 1–5 at once, 12 songs** — `scratch/spike_parallel_matrix.py`, 2026-09-27. Replaces the 5-song estimate above. Rows 1–12 of `workspace/moviepy_table/entry.csv`; 12 divides evenly by 1–4, so there's no lopsided last round. Runs were interleaved 1→5 per round (video 2 rounds, audio 3), each from an empty folder, with one retry per failed song. No JS runtime; Node was off PATH. Raw results: `workspace/spike/par/matrix.csv`.
+
+"Avg s per song" = total time ÷ 12, the effective cost of each song.
+
+| Mode | Workers | Avg s per song (runs) | Speed | vs one at a time | 403 on first try | Failed after retry |
+| --- | --- | --- | --- | --- | --- | --- |
+| Video 720p (390 MB) | 1 | **15.4** (17.8, 12.9) | 2.17 MB/s | — | 0 / 24 | 0 |
+| | 2 | **10.0** (10.4, 9.6) | 3.27 MB/s | **1.54×** | 5 / 24 | 0 |
+| | 3 | **10.0** (11.0, 9.0) | 3.29 MB/s | **1.54×** | 3 / 24 | 0 |
+| | 4 | 11.2 (12.6, 9.7) | 2.96 MB/s | 1.38× | 2 / 24 | 0 |
+| | 5 | 11.4 (11.9, 10.8) | 2.87 MB/s | 1.35× | 2 / 24 | 0 |
+| Audio (41 MB) | 1 | **3.66** (3.53, 3.89, 3.56) | 0.93 MB/s | — | 5 / 36 | 0 |
+| | 2 | 1.89 (1.89, 1.85, 1.92) | 1.79 MB/s | 1.94× | 0 / 36 | 0 |
+| | 3 | 1.83 (1.56, 1.89, 2.04) | 1.82 MB/s | 2.00× | 2 / 36 | **1** |
+| | 4 | 1.65 (1.56, 1.49, 1.90) | 2.08 MB/s | 2.22× | 1 / 36 | 0 |
+| | 5 | **1.49** (1.43, 1.36, 1.68) | 2.29 MB/s | **2.46×** | 0 / 36 | 0 |
+
+- **Video: 2–3 at once is the sweet spot** (~10 s/song, 1.54×). 4–5 is *slower* than 2–3: the connection is already full, and more downloads at once only add overhead. [found]
+- **Audio keeps improving up to 5** (2.46×), with smaller gains after 2 (1.94×). The files are small, so per-song lookup time dominates. [found]
+- **Network variance is large.** The same setting differed by up to 38 % between rounds (video, 1 worker: 17.8 vs 12.9 s/song). Treat differences under ~10 % as noise; for example, 2 vs 3 workers is a tie. [found]
+- ⚠ **403 is not caused by parallelism.** First-try `HTTP Error 403: Forbidden`: 20 of 300 downloads (video 12/120 = 10 %, audio 8/180 = 4.4 %). The one-at-a-time audio runs had 5 of 36, and there's no rising trend with more workers. It's YouTube's intermittent 403 (all 13 affected runs show the same message), likely tied to running without a JS runtime. [found]
+- **One retry fixes almost all of them:** 19 of 20 recovered, and 1 song of 300 (0.3 %) failed its retry too. So retry **2** times before making it a row error. The retry is now exercised [found], replacing the earlier "[verify]".
+- Suggested default (not decided here): 2–3 at once for video, and up to 5 for audio. The worker count and retry count aren't in the SPEC §7 schema → maintainer: hard-code or add config.
+
 - Bad IDs fail loudly (exit 1, specific message): truncated ID → `Incomplete YouTube ID … looks truncated`; well-formed but missing → `This video is unavailable`. Good for row errors. [found]
 - Windows console locale here is cp874 → set `PYTHONIOENCODING=utf-8` (or use the Python API) when capturing yt-dlp output. [found]
 
@@ -230,6 +254,7 @@ Newest first. Date · what was tried · result · where it's now documented.
 
 | Date | Finding | Result | Documented in |
 | ---- | ------- | ------ | ------------- |
+| 2026-09-27 | Parallel matrix 1–5 workers, 12 songs, 300 downloads | video best at 2–3 (1.54×), 4–5 slower; audio 2.46× at 5; 403 on 20/300 first tries, not tied to parallelism; 1 retry fixes 19/20 | §9 |
 | 2026-09-27 | Parallel downloads 1 / 2 / 5 workers, 5 songs | video ~1.3× (2) / ~1.4× (5), bandwidth-bound; audio 2.2× at 5; 2 intermittent 403s of 70, cause unclear | §9 |
 | 2026-09-27 | TOML generate/read/write with tomli-w 1.2.0 | round trip exact; Windows `os.replace` fails on open file → retry; BOM rejected → `utf-8-sig` | §5 |
 | 2026-09-27 | Audio normalization, 4 modes + listening check | **peak chosen by ear** (hard-coded); two-pass loudnorm measured most even (0.8 LU) but pops the countdown out | §10 |
