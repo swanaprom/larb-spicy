@@ -14,5 +14,9 @@ FFmpeg does **not** fail when a song's end time is past the real length of the v
 ## Settings won't save, or won't load?
 
 - Windows refuses to replace `config.toml` while another program has it open (seen as "Access is denied"). Close whatever has it open; the program should retry by itself.
-- If you edit `config.toml` in Notepad, a "UTF-8 with BOM" save used to break Python's TOML reader. Reading with `utf-8-sig` fixes it (TECH.md §5). Keep that in the code, it is not a typo.
+- If you edit `config.toml` in Notepad, a "UTF-8 with BOM" save used to break Python's TOML reader. Reading with `utf-8-sig` fixes it ([[TECH.md]] §5). Keep that in the code, it is not a typo.
 - Comments you type into `config.toml` disappear on the next save. That is normal; the commented reference is `config/example.toml`.
+
+## What are recommended upgrades?
+
+- Expose some configs in TOML as 'Advanced Settings' into GUI, currently hide by design to keep it direct and minimal.
