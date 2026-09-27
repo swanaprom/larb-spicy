@@ -15,14 +15,14 @@ When goals conflict, the order decides.
 
 1. **Reliability** — pipeline fails loudly and specifically, never silently produces a bad combination.
 2. **Maintainability** — next maintainer (possibly with little Python experience) can read this doc + code and make a small change safely.
-3. **Efficiency** — faster than the `moviepy` prototype (target: TODO — put a number here once you have a baseline, e.g. "under N minutes for M songs on reference hardware"). Which currently aimed to use FFmpeg.
+3. **Efficiency** — faster than the `moviepy` prototype. Baseline (2026-09, i5-6400, same 5 songs, 720p video): prototype 605 s, this pipeline 104 s end to end, about 5.8× faster, at higher quality. Target: don't regress below this baseline. Details in TECH §10.
 
 ## 3. Non-Goals
 
 Explicit "we are not doing this, and here's why" — this is what stops scope creep from a future maintainer who tries to be helpful.
 
 - Not enforcing Google Sheet sharing/visibility settings (operator's job — document the checklist in the README, don't code around human error).
-- Not guaranteeing millisecond-accurate trims at download time (full-song download + trim is the deliberate tradeoff for maintainability, per your prototype-carried-forward decision).
+- Not downloading only the needed segment. Full-song download + trim during render is the deliberate choice: confirmed in the 2026-09 spike to be both exact and fastest (segment download starts several seconds early, and forcing it to be exact is several times slower than a full download). Full songs are also reusable from the cache.
 - Not doing the OS-specific releases. Learning curve is flat, Maintainers can rely on AI reading README and follow straight forward instruction. Distribution is clone + setup scripts instead (§16). A frozen executable (e.g. PyInstaller) would also freeze yt-dlp inside it, and an outdated yt-dlp is exactly what breaks when YouTube changes. It would also need per-OS builds and trigger antivirus / "unidentified developer" warnings.
 - Not using `make`. Windows doesn't ship it, and the most likely successor is on Windows.
 
@@ -35,8 +35,11 @@ Keep this current — a future non-technical maintainer will live here.
 |Manifest|The parsed, validated table derived from the Google Sheet, used to drive the pipeline|
 |Countdown|Intro video/audio clip inserted before each song|
 |Cache|Previously-downloaded media kept on disk keyed by `videoID_songtitle_artist` to survive interrupted runs|
-|Row error|A manifest row that fails validation and is skipped, with a reported reason (missing "URL" or "start_time" or "end_time")|
+|Row error|A row that can't be used safely and is skipped, with a reported reason (e.g. unavailable video, bad or out-of-range time range, download still failing after retries)|
 |Row warning|A manifest row with a non-critical issue (e.g. missing "Song Name") that still runs|
+|Padding|Each song is taken 1 s earlier and 1 s later than its sheet time range (clamped to the song's real start/end), so the crossfade doesn't eat into the part the dancers need|
+|File-only setting|A config key that exists only in `config.toml` and is never shown in the GUI. For maintainers who have re-tested a change, not for operators (§7)|
+|Peak normalization|Each clip's loudest point is raised or lowered to the same level (−1 dBFS), so quiet countdowns and loud songs sit together without flattening the music|
 
 ## 5. Architecture Overview
 
@@ -58,27 +61,29 @@ Core Orchestrator
   └─ Logger              -> signal observer to stream to GUI
 ```
 
-**Module boundary rule (write this down, it's the maintainability keystone):** the GUI never touches yt-dlp/FFmpeg directly, and the core never imports GUI code. If you can't unit-test a core module without spinning up the GUI, the boundary has leaked.
+**Module boundary rule (maintainability keystone):** the GUI never touches yt-dlp/FFmpeg directly, and the core never imports GUI code. If you can't unit-test a core module without spinning up the GUI, the boundary has leaked.
 
 **Concurrency model:** settings loaded once at pipeline start (you already decided this — restate it here so it doesn't get "fixed" by someone who reads only the GUI code and assumes live reloading is a bug).
 
 ## 6. Tech Stack
 
-| Concern                   | Choice                                                                              | Notes / alternatives considered                                                                                                                                                                                                                                                                                                                                                          |
-| ------------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Language                  | Python 3.11–3.13 (tested range)                                                     | Pinned as a range, not loose: the venv can't upgrade its own Python, and a new Python can break pinned libraries. 3.11 is also the floor for `tomllib`. Range lives in one file read by both scripts (§16)                                                                                                                                                                               |
-| Video/audio download      | `yt-dlp` (always latest, not pinned)                                                | replaces `moviepy` download path from prototype. The only unpinned dependency — see §16                                                                                                                                                                                                                                                                                                  |
-| FFmpeg binary             | pip-bundled binary (`static-ffmpeg`)                                                | Make it env-bounded, can pin working version, just have system-bound existence and version check (4.3 and newer), in case the library's repo failed to fetch, and prompt operator to download FFmpeg if it's needed. (Reduced friction)                                                                                                                                                  |
-| JS runtime (Deno)         | Only if testing proves yt-dlp needs it for YouTube                                  | Same handling as system-bound FFmpeg (check + ask). If not needed, leave a note in HANDOFF.md instead                                                                                                                                                                                                                                                                                    |
-| Trim / mirror / crossfade | FFmpeg (`xfade`) via `subprocess`, through one internal helper module               | Helper owns every FFmpeg call, keeps binary path separate from the argument list.                                                                                                                                                                                                                                                                                                        |
-| GUI framework             | Tkinter (`ttk`)                                                                     | Zero dependencies (nothing to pin, nothing that can vanish from PyPI), most examples for AI-assisted successors, and enough styling (colors, fonts, log tags) for the actual UI. Rejected: Qt/PySide6 (heavy + licensing questions), CustomTkinter (third-party, risks lagging a Python bump), PySimpleGUI (now needs a license key).                                                    |
-| Config format             | TOML — `tomllib` (read, 3.11+) + `tomli-w` (write, pinned)                          | Python has no built-in TOML writer. But align best among the goals.                                                                                                                                                                                                                                                                                                                      |
-| Sheet access              | Public CSV export URL + standard library (`csv`)                                    | No credentials to inherit or expire, no Google Cloud console for a successor, already tested including the special-character/encoding fix. Matches the §3 non-goal on sharing settings. Local CSV file stays as fallback (§9 stage 2). Rejected API + service account: only buys private-sheet reads and write-back, neither needed. Revisit if writing back to the sheet is ever wanted |
-| Packaging                 | Clone repo + `setup_once` / `run` scripts (`.bat` for Windows, `.sh` for Linux/Mac) | Plain `python -m venv` + `requirements.txt` with exact `==` pins. No extra tools needed beyond Python itself. Rejected: PyInstaller releases, `make` (see §3)                                                                                                                                                                                                                            |
+|Concern|Choice|Notes / alternatives considered|
+|---|---|---|
+|Language|Python 3.11–3.13 (tested range)|Pinned as a range, not loose: the venv can't upgrade its own Python, and a new Python can break pinned libraries. 3.11 is also the floor for `tomllib`. Range lives in one file read by both scripts (§16)|
+|Video/audio download|`yt-dlp` (always latest, not pinned)|replaces `moviepy` download path from prototype. The only unpinned dependency — see §16|
+|FFmpeg binary|pip-bundled binary (`static-ffmpeg`)|Make it env-bounded, can pin working version, just have system-bound existence and version check (4.3 and newer), in case the library's repo failed to fetch, and prompt operator to download FFmpeg if it's needed. (Reduced friction)|
+|JS runtime (Deno / Node)|**Not required** — add only if yt-dlp actually breaks without one|2026-09 spike: downloads work without one (yt-dlp prints a deprecation warning). Node also works if passed explicitly. If it ever becomes necessary, same handling as system-bound FFmpeg (check + ask). Note kept in HANDOFF.md|
+|Trim / mirror / crossfade|FFmpeg via `subprocess`, through one internal helper module; **whole compilation rendered in one pass**|Helper owns every FFmpeg call, keeps binary path separate from the argument list. One pass confirmed in the spike (exact lengths, A/V in sync). Very long video lists are rendered in chunks and joined without re-encoding (TECH §10)|
+|GUI framework|Tkinter (`ttk`)|Zero dependencies (nothing to pin, nothing that can vanish from PyPI), most examples for AI-assisted successors, and enough styling (colors, fonts, log tags) for the actual UI. Rejected: Qt/PySide6 (heavy + licensing questions), CustomTkinter (third-party, risks lagging a Python bump), PySimpleGUI (now needs a license key).|
+|Config format|TOML — `tomllib` (read, 3.11+) + `tomli-w` (write, pinned)|Python has no built-in TOML writer. But align best among the goals.|
+|Sheet access|Public CSV export URL + standard library (`csv`)|No credentials to inherit or expire, no Google Cloud console for a successor, already tested including the special-character/encoding fix. Matches the §3 non-goal on sharing settings. Local CSV file stays as fallback (§9 stage 2). Rejected API + service account: only buys private-sheet reads and write-back, neither needed. Revisit if writing back to the sheet is ever wanted|
+|Packaging|Clone repo + `setup_once` / `run` scripts (`.bat` for Windows, `.sh` for Linux/Mac)|Plain `python -m venv` + `requirements.txt` with exact `==` pins. No extra tools needed beyond Python itself. Rejected: PyInstaller releases, `make` (see §3)|
 
 ## 7. Configuration Schema (TOML)
 
 Write the actual schema, not just "it's configurable." This is the contract between GUI and core.
+
+Keys marked **file-only** are never shown in the GUI. They hold values chosen by testing (see TECH.md); change them only after re-testing.
 
 ```toml
 [output]
@@ -91,17 +96,34 @@ default_files = []
 
 [download]
 cache_directory = ""
-# TODO: retry count, timeout, format/quality selection for yt-dlp
+max_parallel_downloads = 3   # file-only. Tested best for video; more is slower on a full connection (TECH §9)
+max_retries = 2              # file-only. Retries per song before it becomes a row error (TECH §9)
+max_height = 720             # file-only. Largest video height to download, in pixels (720 = "720p").
+                             # Also sets the output height, so video is never upscaled.
+# Codec preference when downloading (prefer H.264) is hard-coded in the downloader adapter:
+# it depends on what each download tool can do, and H.264 is also much faster to render (TECH §9).
+# TODO: timeout — yt-dlp has its own network timeout/retry options; decide in the downloader slice whether they're enough.
 
 [processing]
 audio_only = true
-mirror = false
+mirror = false                   # two modes, see §8 "Mirror rule"
 crossfade_duration_seconds = 1.0
-# TODO: resolution/codec targets (only apply for videos)
+# Deliberately NOT configurable (hard-coded):
+# - Audio normalization: always on, peak to −1 dBFS (§9).
+# - Output video format: H.264, standard 4:2:0 color, 30 fps, height = download.max_height.
+#   H.264 in this form is the only format guaranteed to play in Windows' built-in players
+#   without extra installs (the spike found a 4:4:4 variant that won't play, TECH §10).
+# - Audio-only output: .mp3.
 
-[sheet]
-# TODO: expected column headers, in order, e.g.
-# columns = ["Member Name", "Song URL", "Song Name", "Start Time", "End Time"]
+[sheet.columns]
+# file-only. Maps each field to the sheet's column HEADER NAME (not position), so inserting
+# or reordering columns doesn't break parsing. A header that isn't found aborts the run, naming it.
+# Only the sheet adapter uses this, to turn rows into manifest fields; the core never sees column names.
+song_title = "ชื่อเพลง"
+artist     = "ศิลปิน"
+url        = "URLs"
+time_range = "ช่วงเวลา"
+mirrored   = "Mirrored แล้ว"
 ```
 
 **Read rule:** GUI requests settings detail from core program ONLY on open to resume the change.
@@ -115,14 +137,25 @@ crossfade_duration_seconds = 1.0
 
 This is the section most likely to save you future debugging time — write the rule table now while it's fresh.
 
+Current sheet layout (2026-09), in order: `ชื่อเพลง` (song title), `ศิลปิน` (artist), `URLs`, `ช่วงเวลา` (time range, one column, e.g. `0:27-1:04`), `ผู้เสนอเพลง + ชั้นปี` (proposer), `Mirrored แล้ว` (already mirrored), `หมายเหตุ` (notes). Columns are found by header name through `[sheet.columns]` (§7). Changing which columns exist is a schema change (see CLAUDE.md).
+
 |Column|Required?|Validation|On failure|
 |---|---|---|---|
-|Index|Yes|manifest parser insert these|—|
-|Song URL|Yes|must be a resolvable URL/valid yt-dlp source|row error, skip row, report reason|
-|Song Title|No|—|row warning, included anyway|
-|Artist Name|No|—|row warning, included anyway|
-|Start/End Time|Yes|format check (mm:ss? plain seconds?)|row error, skip row, report reason|
-|...||||
+|Index|Yes|manifest parser inserts these|—|
+|URLs|Yes|video must exist and be available (checked by fetching its info from YouTube, no download)|row error, skip row, report reason|
+|Song title|No|—|row warning, included anyway|
+|Artist|No|—|row warning, included anyway|
+|Time range|Yes|parses to start < end (stray spaces people type inside numbers are ignored); **end ≤ the video's length on YouTube**|row error, skip row, report reason|
+|Mirrored แล้ว|No|empty or only spaces = not mirrored yet; anything else (any text or symbol) = already mirrored|— (used by the Mirror rule below)|
+
+Note: because the URL and length checks ask YouTube, building the manifest needs internet and takes roughly 0.5–3 s per row. It still happens before any download, so a bad row never costs a download.
+
+**Mirror rule** (`processing.mirror`):
+
+1. `mirror = true` — **mirror everything:** every song ends up mirrored. Rows already marked in `Mirrored แล้ว` are left as they are (not flipped twice); all others get flipped.
+2. `mirror = false` — **leave as is:** nothing is flipped, whatever the column says.
+
+Countdowns are never mirrored.
 
 Define the **error vs. warning taxonomy** once, explicitly:
 
@@ -136,20 +169,19 @@ Turn your numbered usage scenario into a state machine / stage list with **input
 |Stage|Input|Output|Failure behavior|
 |---|---|---|---|
 |1. Lock settings|(run start signal?)|settings frozen for this run|—|
-|2. Fetch sheet|Sheet URL, row range (or just plain CSV if it fails to use the live fetch)|raw rows|sheet unreachable/private → abort run with clear message (ties to Non-Goal in §3)|
-|3. Build manifest|raw rows|validated manifest + per-row errors/warnings|see §8|
-|4. Download countdown|countdown URL/file or default|cached countdown media|retry policy? TODO|
-|5. Download songs|manifest URLs|cached song media|skip if already cached (resume-safe)|
-|6. Trim|cached full songs, start/end times|trimmed clips|— (It would be a bug, since manifest will check the format right away before parsed)|
-|7. Mirror (optional)|trimmed clip, settings flag|mirrored clip|—|
-|8. Crossfade/concat|countdown + trimmed clips in sequence|final output file|TODO: partial-failure behavior — one bad song shouldn't necessarily kill the whole compilation? decide and record (if it's know which song is bad, just warn the error and skip, this is the protocol)|
-|9. Unlock GUI|(run end signal?)|settings GUI and TOML is able to be edit again|—|
+|2. Fetch sheet|Sheet URL, row range (or just plain CSV if it fails to use the live fetch)|raw rows|sheet unreachable/private, or a `[sheet.columns]` header not found → abort run with clear message (ties to Non-Goal in §3)|
+|3. Build manifest|raw rows + video info from YouTube (no download)|validated manifest + per-row errors/warnings|see §8|
+|4. Download countdown|countdown URL/file or default|cached countdown media|Use same retry policy as the row below.|
+|5. Download songs|manifest URLs|cached song media|skip if already cached (resume-safe). Up to `max_parallel_downloads` at once; retry each up to `max_retries` times, then row error.|
+|6. Check & measure|cached media, time ranges|real length + loudness peak of each clip|YouTube's length is rounded to whole seconds, so the real file is re-checked. End time past the real length by **about 1 s or less → trim to fit, row warning**. More than that → row error, skip|
+|7. Render (one pass)|countdown + songs in sequence, settings|final output file|Trim with padding, mirror (per §8 Mirror rule), peak normalization (always on), crossfades and countdowns all in one FFmpeg run. Protocol: if a specific song is known bad, warn and skip it; don't kill the whole compilation|
+|8. Unlock GUI|(run end signal?)|settings GUI and TOML editable again|—|
 
 ## 10. Caching Strategy
 
-- Cache key: TODO (videoID_songtitle_artistname) — Not including index in case the order change but the song is cached, videoID is a unique key already, the last two are for human.
+- Cache key: `videoID_songtitle_artistname` — Not including index in case the order change but the song is cached, videoID is a unique key already, the last two are for human.
 - Cache location: from `[download]`. Default under `workspace/cache/` (gitignored, §15).
-- Invalidation: cache never expires, It's prompt after a run to be clear or not, leave the room for operator decision (they can have big disk space and need quick iteration, or is very limited space). But still exist clear cache button on GUI anyway.
+- Invalidation: cache never expires on its own. After each run the operator is asked whether to clear it, since that depends on their machine (plenty of disk and quick iteration, or very limited space). A clear-cache button is also always available in the GUI.
 
 ## 11. Logging & Observability
 
@@ -162,6 +194,7 @@ Turn your numbered usage scenario into a state machine / stage list with **input
 Where files land, naming convention, and whether intermediate files (per-song trims, mirrored clips) are kept or cleaned up after the final concat. Cleanup policy matters for disk space on whatever machine this runs on year over year.
 
 - Git management: all generated data (downloads, cache, intermediates, outputs, logs) lives under `workspace/`, which is gitignored. Nothing generated ever goes into git (§15).
+- Output formats: video `.mp4` (format fixed in §7), audio-only `.mp3`.
 
 ## 13. Coding Standards
 
@@ -186,8 +219,9 @@ Write these down explicitly — this is the section that actually protects "pass
 
 Running list — append here instead of losing the thought between sessions.
 
-- Millisecond-accurate segment download not solved (full download + trim tradeoff, §3).
 - Google Sheet cloned from private Gmail instead of group Gmail — operator error, not enforced in code. Revisit if it becomes a recurring problem.
+- YouTube reports song length rounded to whole seconds, so the early check (§8) can't catch every overrun; the after-download check (§9 stage 6) stays as the second guard.
+- Sheet column mapping is file-only for now (§7). A future generation can expose it in the GUI if the sheet layout changes often.
 - TODO: name of the Python version-range file read by both scripts.
 
 ## 15. Repository & Version Control
@@ -207,7 +241,7 @@ larb-spicy/
 ├── CLAUDE.md             # house rules for Claude Code (committed)
 ├── docs/SPEC.md          # this document
 ├── docs/HANDOFF.md       # decisions + gotchas for next generation
-├── docs/TECH.md          # this document
+├── docs/TECH.md          # implementation notes: the how (SPEC wins on conflict)
 ├── requirements.txt      # exact == pins, everything except yt-dlp
 ├── <python range file>   # single source of truth for supported Python
 ├── setup_once.bat / .sh
@@ -237,26 +271,28 @@ Dependency strategy: **stable where possible, fresh where necessary.**
 - Everything is pinned to known-good versions (`requirements.txt`, exact `==`), except yt-dlp.
 - yt-dlp is always latest, because an outdated yt-dlp is what breaks. Installed on its own line in the scripts, so nobody pins it (or unpins everything else) by accident.
 - Python is pinned to a tested range (§6). Pinned Python + pinned libraries age together consistently.
-- Fallback system-bound FFmpeg (and Deno, if needed) are outside Python: checked, not managed by the venv.
+- FFmpeg comes from `static-ffmpeg` inside the venv (pinned). The fallback system FFmpeg is outside Python: checked, not managed by the venv. No JS runtime is required (§6).
 
 Key fact: a venv is a folder of libraries pointing to one specific installed Python. It isolates libraries and specify their versions, while the **scripts** guarantee the Python version.
 
-`setup_once`: 
-1. Find a Python in the supported range (Windows: `py -0` lists installed, `py -3.12` picks one; Linux/Mac: try `python3.12`, `python3.13`, ...). None found → Offer `winget` (or some package manager method for linux) or point to python.org (Windows: tick "Add to PATH") and stop. 
-2. Build the venv with that Python. 
-3. Install pinned libraries + latest yt-dlp. 
-4. Check FFmpeg (and Deno if needed). Missing → ask whether to install (`winget` on Windows, `brew` on Mac). After installing, tell the user to reopen the terminal and run setup again. On Linux, print the `apt`/`sudo` command instead of running it. 
+`setup_once`:
 
-`run`: 
-1. Venv missing, or its Python outside the range → rebuild it automatically. 
-2. `pip install -U yt-dlp` (not `yt-dlp -U`, which is for the standalone binary). No internet → warn and continue with the installed version. 
+1. Find a Python in the supported range (Windows: `py -0` lists installed, `py -3.12` picks one; Linux/Mac: try `python3.12`, `python3.13`, ...). None found → Offer `winget` (or some package manager method for linux) or point to python.org (Windows: tick "Add to PATH") and stop.
+2. Build the venv with that Python.
+3. Install pinned libraries + latest yt-dlp.
+4. Get FFmpeg: trigger the `static-ffmpeg` download now (about 45 s and 200 MB the first time), so the first real run doesn't stall. If that fails → use system FFmpeg if it's new enough → else ask whether to install it (`winget` on Windows, `brew` on Mac; on Linux, print the command). After installing, tell the user to reopen the terminal and run setup again.
+
+`run`:
+
+1. Venv missing, or its Python outside the range → rebuild it automatically.
+2. `pip install -U yt-dlp` (not `yt-dlp -U`, which is for the standalone binary). No internet → warn and continue with the installed version.
 3. Log the yt-dlp version (first suspect when downloads break), then start the program.
 
 ## 17. Maintenance & Hand-off
 
 `docs/HANDOFF.md` must include at least:
 
-- "Downloads failing? Update yt-dlp first. If still failing, it may need Deno (JS runtime)."
+- "Downloads failing? Update yt-dlp first. If still failing, it may need a JS runtime (Deno is yt-dlp's default; Node works if passed explicitly)."
 - Python update recipe (expect every few years, when yt-dlp drops an end-of-life Python):
     1. Install the new Python from python.org _alongside_ the old one; don't uninstall yet.
     2. Change the range in the Python range file.
