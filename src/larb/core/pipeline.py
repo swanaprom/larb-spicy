@@ -2,15 +2,17 @@
 
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 from larb.core.cache import cache_stem, find_cached
 from larb.core.errors import (DownloadError, LarbError, MediaUnavailableError, RenderError)
 from larb.core.manifest import ParsedRow, RowProblem, parse_row, select_rows
-from larb.core.models import (DownloadSettings, Level, LogEvent, ManifestEntry, MediaKind, RenderPlan,
-                              RowRange, RunResult, Segment, Settings)
+from larb.core.models import (DownloadSettings, Level, LogEvent, ManifestEntry, MediaInfo, MediaKind,
+                              RenderPlan, RowRange, RunResult, Segment, Settings, SheetRow)
 from larb.core.ports import EventSink, MediaProcessor, MediaSource, SongListSource
 from larb.core.settings import validate_settings
 
@@ -47,6 +49,16 @@ def choose_countdown(given: str | None, settings: Settings) -> str:
                     "countdown.default_urls or countdown.default_files in the settings file")
 
 
+@dataclass
+class _RowCheck:
+    """The outcome of checking one sheet row, kept until it's this row's turn to be
+    reported (rows are checked in parallel but reported in sheet order)."""
+
+    row_number: int
+    entry: ManifestEntry | None = None
+    messages: list[tuple[Level, str]] = field(default_factory=list)
+
+
 class Pipeline:
     """One run of the whole compilation.
 
@@ -68,14 +80,15 @@ class Pipeline:
 
     # -- logging helpers ---------------------------------------------------
 
-    def _log(self, level: Level, stage: str, message: str, row: int | None = None) -> None:
+    def _log(self, level: Level, stage: str, message: str, row: int | None = None,
+             progress: tuple[int, int] | None = None) -> None:
         if level is Level.ERROR and row is not None:
             with self._counts_lock:
                 self._errors += 1
         elif level is Level.WARNING and row is not None:
             with self._counts_lock:
                 self._warnings += 1
-        self._events.emit(LogEvent(level, stage, message, row))
+        self._events.emit(LogEvent(level, stage, message, row, progress))
 
     # -- the run -----------------------------------------------------------
 
@@ -114,12 +127,12 @@ class Pipeline:
             self._log(Level.INFO, "sheet", f"Using rows {rows.first}-{rows.last}: "
                       f"{len(sheet_rows)} row(s) with content")
 
-        # Stage 4, done before stage 3 on purpose: a run can't succeed without the
-        # countdown, so a bad one should stop it before minutes of manifest look-ups.
+        # Stage 3: prepare the countdown before the manifest on purpose: a run can't succeed
+        # without it, so a bad one should stop the run before minutes of manifest look-ups.
         countdown_segment = self._prepare_countdown(countdown, kind, cache_dir, settings)
 
-        # Stage 3: build the manifest (offline rules, then ask the media source).
-        entries = self._build_manifest(sheet_rows)
+        # Stage 4: build the manifest (offline rules, then ask the media source).
+        entries = self._build_manifest(sheet_rows, settings.download)
 
         # Stage 5: download songs (cached ones are skipped).
         paths = self._download_all(entries, kind, cache_dir, settings.download)
@@ -157,36 +170,84 @@ class Pipeline:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _build_manifest(self, rows) -> list[ManifestEntry]:
+    def _build_manifest(self, rows: list[SheetRow], dl: DownloadSettings) -> list[ManifestEntry]:
+        """Check every row, looking videos up max_parallel_downloads at a time.
+
+        Rows finish in any order, but their results, errors and warnings are
+        reported in sheet order. A progress event goes out as each row finishes.
+        """
+        total = len(rows)
+        self._log(Level.INFO, "manifest", f"Checking {total} row(s), "
+                  f"up to {dl.max_parallel_downloads} at once", progress=(0, total))
+        done = 0
+        done_lock = threading.Lock()
+
+        def check(row: SheetRow) -> _RowCheck:
+            nonlocal done
+            result = self._check_row(row, dl.max_retries)
+            with done_lock:   # also keeps the progress events in counting order
+                done += 1
+                self._log(Level.INFO, "manifest", f"checked {done}/{total}", row.row_number,
+                          progress=(done, total))
+            return result
+
         entries = []
-        for row in rows:
-            try:
-                parsed: ParsedRow = parse_row(row.row_number, row.song_title, row.artist,
-                                              row.url, row.time_range, row.mirrored)
-            except RowProblem as problem:
-                self._log(Level.ERROR, "manifest", f"skipped: {problem}", row.row_number)
-                continue
-            for warning in parsed.warnings:
-                self._log(Level.WARNING, "manifest", warning, row.row_number)
-            try:
-                info = self._media.lookup(parsed.url)
-            except MediaUnavailableError as e:
-                self._log(Level.ERROR, "manifest", f"skipped: video unavailable: {e}", row.row_number)
-                continue
-            # YouTube rounds the length to whole seconds, so this catches most bad
-            # ranges before downloading; stage 6 checks the real file again.
-            if parsed.end_s > info.duration_s:
-                self._log(Level.ERROR, "manifest", f"skipped: end time {parsed.end_s} s is past the "
-                          f"video's length ({info.duration_s:.0f} s)", row.row_number)
-                continue
-            entry = ManifestEntry(parsed.row_number, parsed.title, parsed.artist, parsed.url,
-                                  float(parsed.start_s), float(parsed.end_s), parsed.already_mirrored, info)
-            self._log(Level.INFO, "manifest", f"ok: {entry.display_name} "
-                      f"({parsed.start_s}-{parsed.end_s} s{', already mirrored' if parsed.already_mirrored else ''})",
-                      row.row_number)
-            entries.append(entry)
-        self._log(Level.INFO, "manifest", f"{len(entries)} of {len(rows)} row(s) usable")
+        with ThreadPoolExecutor(max_workers=dl.max_parallel_downloads) as pool:
+            # map() hands the results back in the order of `rows`, however they finish.
+            for result in pool.map(check, rows):
+                for level, message in result.messages:
+                    self._log(level, "manifest", message, result.row_number)
+                if result.entry:
+                    entries.append(result.entry)
+        self._log(Level.INFO, "manifest", f"{len(entries)} of {total} row(s) usable")
         return entries
+
+    def _check_row(self, row: SheetRow, max_retries: int) -> _RowCheck:
+        """Check one row: offline rules, then the media source. Runs in a worker thread,
+        so it logs nothing itself; its messages are reported later, in sheet order."""
+        result = _RowCheck(row.row_number)
+        try:
+            parsed: ParsedRow = parse_row(row.row_number, row.song_title, row.artist,
+                                          row.url, row.time_range, row.mirrored)
+        except RowProblem as problem:
+            result.messages.append((Level.ERROR, f"skipped: {problem}"))
+            return result
+        result.messages += [(Level.WARNING, warning) for warning in parsed.warnings]
+        try:
+            info = self._lookup_with_retries(
+                parsed.url, max_retries, lambda msg: result.messages.append((Level.WARNING, msg)))
+        except MediaUnavailableError as e:
+            result.messages.append((Level.ERROR, f"skipped: video unavailable: {e}"))
+            return result
+        # YouTube rounds the length to whole seconds, so this catches most bad
+        # ranges before downloading; stage 6 checks the real file again.
+        if parsed.end_s > info.duration_s:
+            result.messages.append((Level.ERROR, f"skipped: end time {parsed.end_s} s is past the "
+                                    f"video's length ({info.duration_s:.0f} s)"))
+            return result
+        result.entry = ManifestEntry(parsed.row_number, parsed.title, parsed.artist, parsed.url,
+                                     float(parsed.start_s), float(parsed.end_s), parsed.already_mirrored, info)
+        result.messages.append((Level.INFO, f"ok: {result.entry.display_name} ({parsed.start_s}-{parsed.end_s} s"
+                                f"{', already mirrored' if parsed.already_mirrored else ''})"))
+        return result
+
+    def _lookup_with_retries(self, url: str, max_retries: int,
+                             note_retry: Callable[[str], None]) -> MediaInfo:
+        """Look one video up, retrying retryable errors up to max_retries times (the
+        same policy as downloads). note_retry gets a message for each retry.
+
+        Raises:
+            MediaUnavailableError: The last try failed, or the error isn't worth retrying.
+        """
+        for attempt in range(max_retries + 1):
+            try:
+                return self._media.lookup(url)
+            except MediaUnavailableError as e:
+                if attempt == max_retries or not e.retryable:
+                    raise
+                note_retry(f"look-up retry {attempt + 1}/{max_retries}: {e}")
+                time.sleep(RETRY_PAUSE_S * (attempt + 1))
+        raise AssertionError("unreachable: the loop always returns or raises")
 
     def _prepare_countdown(self, countdown: str, kind: MediaKind, cache_dir: Path,
                            settings: Settings) -> Segment:
@@ -208,7 +269,8 @@ class Pipeline:
         """A countdown URL goes through the media source like a song: same look-up,
         same cache name, same retries. Only the failure differs: it stops the run."""
         try:
-            info = self._media.lookup(url)
+            info = self._lookup_with_retries(
+                url, dl.max_retries, lambda msg: self._log(Level.WARNING, "countdown", msg))
         except MediaUnavailableError as e:
             raise LarbError(f"Countdown video unavailable: {e}") from None
         name = f"countdown {info.title or url}"
