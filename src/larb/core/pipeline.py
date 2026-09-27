@@ -8,9 +8,9 @@ from pathlib import Path
 
 from larb.core.cache import cache_stem, find_cached
 from larb.core.errors import (DownloadError, LarbError, MediaUnavailableError, RenderError)
-from larb.core.manifest import ParsedRow, RowProblem, parse_row
-from larb.core.models import (Level, LogEvent, ManifestEntry, MediaKind, RenderPlan, RunResult,
-                              Segment, Settings)
+from larb.core.manifest import ParsedRow, RowProblem, parse_row, select_rows
+from larb.core.models import (DownloadSettings, Level, LogEvent, ManifestEntry, MediaKind, RenderPlan,
+                              RowRange, RunResult, Segment, Settings)
 from larb.core.ports import EventSink, MediaProcessor, MediaSource, SongListSource
 from larb.core.settings import validate_settings
 
@@ -23,6 +23,28 @@ RETRY_PAUSE_S = 1.0         # pause before retry n is n * this
 
 # Characters Windows doesn't allow in file names.
 _ILLEGAL_FILENAME_CHARS = set('<>:"/\\|?*')
+
+
+def is_url(text: str) -> bool:
+    """True for a web address (countdown or sheet), False for a local file path."""
+    return text.strip().lower().startswith(("http://", "https://"))
+
+
+def choose_countdown(given: str | None, settings: Settings) -> str:
+    """The countdown to use: the one given for this run, else the first of
+    countdown.default_urls, else the first of countdown.default_files.
+
+    Returns:
+        A URL or a local file path (see is_url).
+
+    Raises:
+        LarbError: No countdown given and none set in the settings.
+    """
+    for candidate in (given, *settings.countdown.default_urls, *settings.countdown.default_files):
+        if candidate and candidate.strip():
+            return candidate.strip()
+    raise LarbError("No countdown. Pass --countdown with a file or a YouTube URL, or set "
+                    "countdown.default_urls or countdown.default_files in the settings file")
 
 
 class Pipeline:
@@ -57,12 +79,17 @@ class Pipeline:
 
     # -- the run -----------------------------------------------------------
 
-    def run(self, source: str, countdown_file: Path, settings: Settings,
-            now: datetime | None = None) -> RunResult:
+    def run(self, source: str, countdown: str, settings: Settings,
+            now: datetime | None = None, rows: RowRange | None = None) -> RunResult:
         """Run every stage and return where the output went.
 
         Row problems are logged and the row is skipped; the rest still renders.
         Problems that make the whole run impossible raise.
+
+        Args:
+            source: Where the song list is (sheet URL or CSV file).
+            countdown: A countdown URL or local file path (see choose_countdown).
+            rows: Only use these sheet rows. None = all rows.
 
         Raises:
             LarbError: The run can't produce an output (no songs left, sheet
@@ -80,14 +107,19 @@ class Pipeline:
 
         # Stage 2: fetch the song list.
         self._log(Level.INFO, "sheet", f"Reading song list: {source}")
-        rows = self._songs.fetch_rows(source)
-        self._log(Level.INFO, "sheet", f"{len(rows)} row(s) found")
+        sheet_rows = self._songs.fetch_rows(source)
+        self._log(Level.INFO, "sheet", f"{len(sheet_rows)} row(s) found")
+        if rows is not None:
+            sheet_rows = select_rows(sheet_rows, rows)
+            self._log(Level.INFO, "sheet", f"Using rows {rows.first}-{rows.last}: "
+                      f"{len(sheet_rows)} row(s) with content")
+
+        # Stage 4, done before stage 3 on purpose: a run can't succeed without the
+        # countdown, so a bad one should stop it before minutes of manifest look-ups.
+        countdown_segment = self._prepare_countdown(countdown, kind, cache_dir, settings)
 
         # Stage 3: build the manifest (offline rules, then ask the media source).
-        entries = self._build_manifest(rows)
-
-        # Stage 4: countdown (local file only in this phase).
-        countdown = self._check_countdown(countdown_file, settings.processing.crossfade_duration_seconds)
+        entries = self._build_manifest(sheet_rows)
 
         # Stage 5: download songs (cached ones are skipped).
         paths = self._download_all(entries, kind, cache_dir, settings.download)
@@ -100,9 +132,11 @@ class Pipeline:
         # Stage 7: render in one pass.
         plan_segments = []
         for song in segments:
-            plan_segments += [countdown, song]
-        plan = RenderPlan(tuple(plan_segments), settings.processing.crossfade_duration_seconds,
-                          kind.audio_only, kind.max_height)
+            plan_segments += [countdown_segment, song]
+        crossfade = settings.processing.crossfade_duration_seconds
+        # The end fade-out is as long as a crossfade: hard-coded, not a setting (SPEC §9 stage 7).
+        plan = RenderPlan(tuple(plan_segments), crossfade, kind.audio_only, kind.max_height,
+                          fade_out_s=crossfade)
         output = self._output_path(output_dir, settings.output.filename_template, kind, now)
         self._log(Level.INFO, "render", f"Rendering {len(segments)} song(s), "
                   f"about {plan.expected_duration_s:.1f} s long -> {output}")
@@ -112,7 +146,7 @@ class Pipeline:
         self._log(Level.INFO, "render", f"Done in {time.perf_counter() - started:.1f} s: {output}")
 
         # Stage 8 (unlock the GUI) belongs to the GUI; nothing to do here.
-        return RunResult(output, len(segments), self._errors, self._warnings)
+        return RunResult(output, len(segments), self._errors, self._warnings, cache_dir)
 
     # -- stage helpers ---------------------------------------------------------
 
@@ -154,9 +188,42 @@ class Pipeline:
         self._log(Level.INFO, "manifest", f"{len(entries)} of {len(rows)} row(s) usable")
         return entries
 
+    def _prepare_countdown(self, countdown: str, kind: MediaKind, cache_dir: Path,
+                           settings: Settings) -> Segment:
+        """Get the countdown (downloading it if it's a URL) and measure it.
+
+        Raises:
+            LarbError: The countdown can't be found, downloaded or used. The run stops:
+                there is no compilation without a countdown.
+        """
+        if is_url(countdown):
+            path = self._fetch_countdown(countdown.strip(), kind, cache_dir, settings.download)
+        else:
+            path = Path(countdown)
+            if not path.is_file():
+                raise LarbError(f"Countdown file not found: {path}")
+        return self._check_countdown(path, settings.processing.crossfade_duration_seconds)
+
+    def _fetch_countdown(self, url: str, kind: MediaKind, cache_dir: Path, dl: DownloadSettings) -> Path:
+        """A countdown URL goes through the media source like a song: same look-up,
+        same cache name, same retries. Only the failure differs: it stops the run."""
+        try:
+            info = self._media.lookup(url)
+        except MediaUnavailableError as e:
+            raise LarbError(f"Countdown video unavailable: {e}") from None
+        name = f"countdown {info.title or url}"
+        stem = cache_stem(info.media_id, kind)
+        cached = find_cached(cache_dir, stem)
+        if cached:
+            self._log(Level.INFO, "countdown", f"cached: {name} ({cached.name})")
+            return cached
+        self._log(Level.INFO, "countdown", f"Downloading {name}")
+        try:
+            return self._download_with_retries(url, stem, name, None, kind, cache_dir, dl.max_retries)
+        except DownloadError as e:
+            raise LarbError(f"Countdown download failed: {e}") from None
+
     def _check_countdown(self, path: Path, crossfade_s: float) -> Segment:
-        if not path.is_file():
-            raise LarbError(f"Countdown file not found: {path}")
         info = self._processor.measure(path, 0.0, None)
         if info.duration_s <= crossfade_s:
             raise LarbError(f"Countdown is {info.duration_s:.2f} s long, which is not longer "
@@ -191,22 +258,33 @@ class Pipeline:
 
     def _download_one(self, entry: ManifestEntry, kind: MediaKind, cache_dir: Path,
                       max_retries: int) -> Path | None:
-        """One video, retried on retryable errors. Runs in a worker thread."""
+        """One song. Runs in a worker thread. A failure becomes a row error."""
         stem = cache_stem(entry.media.media_id, kind)
+        try:
+            return self._download_with_retries(entry.url, stem, entry.display_name, entry.row_number,
+                                               kind, cache_dir, max_retries)
+        except DownloadError as e:
+            self._log(Level.ERROR, "download", f"skipped: {entry.display_name}: {e}", entry.row_number)
+            return None
+
+    def _download_with_retries(self, url: str, stem: str, name: str, row: int | None,
+                               kind: MediaKind, cache_dir: Path, max_retries: int) -> Path:
+        """Download one video (song or countdown), retrying retryable errors up to max_retries times.
+
+        Raises:
+            DownloadError: The last try failed, or the error isn't worth retrying.
+        """
         for attempt in range(max_retries + 1):
             try:
-                path = self._media.download(entry.url, kind, cache_dir, stem)
-                self._log(Level.INFO, "download", f"done: {entry.display_name} ({path.name})", entry.row_number)
+                path = self._media.download(url, kind, cache_dir, stem)
+                self._log(Level.INFO, "download", f"done: {name} ({path.name})", row)
                 return path
             except DownloadError as e:
-                last_try = attempt == max_retries or not e.retryable
-                if last_try:
-                    self._log(Level.ERROR, "download", f"skipped: {entry.display_name}: {e}", entry.row_number)
-                    return None
-                self._log(Level.WARNING, "download", f"retry {attempt + 1}/{max_retries}: "
-                          f"{entry.display_name}: {e}", entry.row_number)
+                if attempt == max_retries or not e.retryable:
+                    raise
+                self._log(Level.WARNING, "download", f"retry {attempt + 1}/{max_retries}: {name}: {e}", row)
                 time.sleep(RETRY_PAUSE_S * (attempt + 1))
-        return None
+        raise AssertionError("unreachable: the loop always returns or raises")
 
     def _measure_songs(self, entries, paths: dict[str, Path], settings: Settings) -> list[Segment]:
         crossfade = settings.processing.crossfade_duration_seconds

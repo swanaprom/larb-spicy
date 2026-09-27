@@ -1,11 +1,16 @@
-"""Cache naming and lookup (naming rule documented for operators in HANDOFF.md)."""
+"""Cache naming, lookup and clearing (naming rule documented for operators in HANDOFF.md)."""
 
+import re
 from pathlib import Path
 
 from larb.core.models import MediaKind
 
 # Leftovers of an interrupted download: never count them as cached.
 _PARTIAL_SUFFIXES = {".part", ".ytdl", ".tmp", ".temp"}
+
+# A cache file, or a leftover piece of one: "<id>_audio.<...>" or "<id>_v<height>.<...>",
+# e.g. "abc_audio.webm", "abc_v720.mp4", "abc_v720.f136.mp4.part".
+_CACHE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+_(audio|v\d+)\..+$")
 
 
 def cache_stem(media_id: str, kind: MediaKind) -> str:
@@ -31,3 +36,20 @@ def find_cached(cache_dir: Path, stem: str) -> Path | None:
                 and path.suffix.lower() not in _PARTIAL_SUFFIXES and path.stat().st_size > 0):
             return path
     return None
+
+
+def clear_cache(cache_dir: Path) -> int:
+    """Delete the cached downloads in cache_dir and return how many files were deleted.
+
+    Only files named by the cache rule (plus leftovers of interrupted downloads)
+    are deleted. The operator may point the cache at any folder, so anything
+    else in it is left alone. Subfolders are never touched.
+    """
+    if not cache_dir.is_dir():
+        return 0
+    deleted = 0
+    for path in cache_dir.iterdir():
+        if path.is_file() and _CACHE_NAME_RE.match(path.name):
+            path.unlink()
+            deleted += 1
+    return deleted

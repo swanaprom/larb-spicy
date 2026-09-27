@@ -69,6 +69,15 @@ class SheetRow:
 
 
 @dataclass(frozen=True)
+class RowRange:
+    """Which sheet rows to use, both ends included, numbered as the operator sees
+    them in the sheet (the header is row 1, so the first song is row 2)."""
+
+    first: int
+    last: int
+
+
+@dataclass(frozen=True)
 class MediaInfo:
     """What the media source knows about a video before downloading it.
 
@@ -130,12 +139,19 @@ class Segment:
 
 @dataclass(frozen=True)
 class RenderPlan:
-    """Everything the renderer needs. Segments play in order, crossfaded at every join."""
+    """Everything the renderer needs. Segments play in order, crossfaded at every join.
+
+    Attributes:
+        fade_out_s: The output fades to silence (and to black) over its last
+            fade_out_s seconds, ending exactly at the end. 0 = no fade. The core
+            decides it; the renderer only applies it. It doesn't change the length.
+    """
 
     segments: tuple[Segment, ...]
     crossfade_s: float
     audio_only: bool
     height: int
+    fade_out_s: float = 0.0
 
     @property
     def expected_duration_s(self) -> float:
@@ -194,3 +210,4 @@ class RunResult:
     songs_rendered: int
     row_errors: int
     row_warnings: int
+    cache_dir: Path     # where this run's downloads are kept (for the clear-cache question)

@@ -6,6 +6,9 @@ Pure rules, no tools: everything here can be tested without internet or FFmpeg.
 import re
 from dataclasses import dataclass
 
+from larb.core.errors import LarbError
+from larb.core.models import RowRange, SheetRow
+
 # One time: m:ss, m.ss, or h:mm:ss. Seconds (and minutes after hours) need two digits,
 # so "1.5" is rejected instead of guessed as 1:05 or 1:50.
 _TIME = r"(\d+)[.:](\d{2})(?:[.:](\d{2}))?"
@@ -89,3 +92,43 @@ def parse_row(row_number: int, title: str, artist: str, url: str,
     if not artist:
         warnings.append("artist is empty")
     return ParsedRow(row_number, title, artist, url, start, end, is_marked(mirrored), tuple(warnings))
+
+
+# --rows: "2-10", or one row alone ("5" = "5-5"). Any dash type, spaces allowed.
+_ROWS_RE = re.compile(r"^(\d+)(?:[-–—](\d+))?$")
+FIRST_SONG_ROW = 2   # row 1 is the header
+
+
+def parse_row_range(text: str) -> RowRange:
+    """Parse the operator's row range, e.g. "2-10" or "5".
+
+    Only the form is checked here; whether the rows exist is checked against the
+    sheet by select_rows().
+
+    Raises:
+        LarbError: Not a range, a backwards range, or it includes the header row.
+    """
+    match = _ROWS_RE.match(re.sub(r"\s+", "", text or ""))
+    if not match:
+        raise LarbError(f"Row range {text!r} isn't in a form like 2-10 (or 5 for one row)")
+    first = int(match.group(1))
+    last = int(match.group(2)) if match.group(2) else first
+    if first > last:
+        raise LarbError(f"Row range {text!r} is backwards: the first row must not be after the last")
+    if first < FIRST_SONG_ROW:
+        raise LarbError(f"Row range {text!r} starts before row {FIRST_SONG_ROW}: row 1 is the "
+                        f"header, so songs start at row {FIRST_SONG_ROW}")
+    return RowRange(first, last)
+
+
+def select_rows(rows: list[SheetRow], wanted: RowRange) -> list[SheetRow]:
+    """Keep only the rows inside the range (row numbers as shown in the sheet).
+
+    Raises:
+        LarbError: The range reaches past the sheet's last song row.
+    """
+    last_row = max((r.row_number for r in rows), default=FIRST_SONG_ROW - 1)
+    if wanted.last > last_row:
+        where = f"the last song is on row {last_row}" if rows else "the sheet has no songs"
+        raise LarbError(f"Row range {wanted.first}-{wanted.last} is outside the sheet: {where}")
+    return [r for r in rows if wanted.first <= r.row_number <= wanted.last]

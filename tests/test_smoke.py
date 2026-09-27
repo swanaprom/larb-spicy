@@ -5,105 +5,52 @@ FFmpeg processor. Checks the output's length, not just that it exists: FFmpeg
 can succeed and still write a wrong file (TECH §10).
 
 Run from the repository root:
-    .venv\\Scripts\\python.exe -m unittest discover -s tests -v
+    .venv\\Scripts\\python.exe -m unittest -v
 """
 
 import math
-import shutil
+import re
 import sys
-import tempfile
 import unittest
-from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from larb.adapters.ffmpeg.locate import find_ffmpeg  # noqa: E402
-from larb.adapters.ffmpeg.processor import FfmpegProcessor  # noqa: E402
-from larb.core.errors import DownloadError, MediaUnavailableError  # noqa: E402
-from larb.core.models import (DownloadSettings, Level, MediaInfo, ProcessingSettings,  # noqa: E402
-                              Settings, SheetRow)
-from larb.core.pipeline import Pipeline  # noqa: E402
-from larb.core.ports import EventSink, MediaSource, SongListSource  # noqa: E402
+from fakes import (CD_MP3, CD_MP4, SEWER, THAI_MP4, XG, FakeMedia,  # noqa: E402
+                   PipelineTestCase, row)
+from larb.adapters.ffmpeg.helper import run_tool  # noqa: E402
+from larb.core.models import DownloadSettings, Level, ProcessingSettings, Settings  # noqa: E402
 
-FIX = ROOT / "tests" / "fixtures"
-XG = FIX / "XG - GRL GVNG (Instrumental).mp3"
-SEWER = FIX / "sewer. [Instrumental].mp3"
-THAI_MP4 = next(FIX.glob("*.mp4"))            # 7.27 s, awkward name on purpose
-CD_MP3 = FIX / "countdown" / "!countdown.mp3"
-CD_MP4 = FIX / "countdown" / "!countdown.mp4"
 TOLERANCE_S = 0.1
+# End fade-out checks: the last moment must be (near) silent and (near) black,
+# while a moment before the fade still has sound, so the check can't pass by accident.
+END_WINDOW_S = 0.02     # the last this-many seconds are checked (a linear fade is still ~5 % loud
+                        # 50 ms before the end, too close to SILENT_DB on real songs)
+SILENT_DB = -30.0       # peak in the end window must be below this
+BLACK_LUMA = 30         # average brightness of the last frame (0-255; video black is 16). The last
+                        # frame starts 1/30 s before the end, so a little picture is left: ~20 measured,
+                        # vs ~138 without the fade.
 
 
-class FakeSongs(SongListSource):
-    def __init__(self, rows):
-        self.rows = rows
+class SmokeTest(PipelineTestCase):
 
-    def fetch_rows(self, source):
-        return self.rows
+    def assert_fades_to_silence(self, output, length, loud_before=True):
+        """loud_before: also check there's sound just before the fade (only when the
+        last song is loud right up to its end)."""
+        end_peak = self.processor.measure(output, length - END_WINDOW_S, None).peak_db
+        self.assertLess(end_peak, SILENT_DB, "the output should end (near) silent")
+        if loud_before:
+            before_fade = self.processor.measure(output, length - 2.5, length - 1.5).peak_db
+            self.assertGreater(before_fade, SILENT_DB, "the output should have sound before the fade")
 
-
-class FakeMedia(MediaSource):
-    """url -> (fixture file, reported length). Reported length can lie, like YouTube's rounding."""
-
-    def __init__(self, table, fail_first=()):
-        self.table = table
-        self.downloads = 0
-        self._fail_first = set(fail_first)   # urls whose first download fails with a retryable error
-
-    def lookup(self, url):
-        if url not in self.table:
-            raise MediaUnavailableError(f"{url}: This video is unavailable")
-        path, length = self.table[url]
-        return MediaInfo(media_id=url.split("//")[-1], title=path.stem, duration_s=length)
-
-    def download(self, url, kind, dest_dir, stem):
-        if url in self._fail_first:
-            self._fail_first.discard(url)
-            raise DownloadError("HTTP Error 403: Forbidden", retryable=True)
-        self.downloads += 1
-        path, _ = self.table[url]
-        target = dest_dir / f"{stem}{path.suffix}"
-        shutil.copyfile(path, target)
-        return target
-
-
-class RecordingSink(EventSink):
-    def __init__(self):
-        self.events = []
-
-    def emit(self, event):
-        self.events.append(event)
-
-    def messages(self, level):
-        return [f"{e.row_number}: {e.message}" for e in self.events if e.level is level]
-
-
-def row(n, url, time_range, title="Song", artist="Artist", mirrored=""):
-    return SheetRow(n, title, artist, url, time_range, mirrored)
-
-
-class SmokeTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.tools = find_ffmpeg()
-
-    def setUp(self):
-        (ROOT / "workspace").mkdir(exist_ok=True)
-        self.workspace = Path(tempfile.mkdtemp(prefix="smoke_", dir=ROOT / "workspace"))
-        self.sink = RecordingSink()
-        self.processor = FfmpegProcessor(self.tools, self.workspace / "tmp", self.sink)
-
-    def tearDown(self):
-        shutil.rmtree(self.workspace, ignore_errors=True)
-
-    def real_length(self, path):
-        return self.processor.measure(path, 0.0, 0.1).duration_s
-
-    def run_pipeline(self, rows, media, countdown, settings):
-        pipeline = Pipeline(FakeSongs(rows), media, self.processor, self.sink, self.workspace)
-        return pipeline.run("fake-sheet", countdown, settings, now=datetime(2026, 9, 27, 14, 30, 12))
+    def last_frame_luma(self, output):
+        """Average brightness of the last frames, read with FFmpeg's signalstats filter."""
+        result = run_tool(self.tools.ffmpeg, [
+            "-hide_banner", "-sseof", "-0.2", "-i", str(output), "-an",
+            "-vf", "signalstats,metadata=print:key=lavfi.signalstats.YAVG", "-f", "null", "-"])
+        values = re.findall(r"lavfi\.signalstats\.YAVG=([\d.]+)", result.stderr)
+        self.assertTrue(values, "signalstats reported no frames")
+        return float(values[-1])
 
     def test_audio_only(self):
         sewer_len = self.real_length(SEWER)                  # 66.51 s
@@ -127,7 +74,10 @@ class SmokeTest(unittest.TestCase):
         cd = self.real_length(CD_MP3)
         expected = 3 * cd + (41 - 29) + (21 - 9) + (sewer_len - 49) - 5 * 1.0
         self.assertEqual(result.output_path.name, "2026-09-27_143012.mp3")
-        self.assertAlmostEqual(self.real_length(result.output_path), expected, delta=TOLERANCE_S)
+        actual = self.real_length(result.output_path)
+        self.assertAlmostEqual(actual, expected, delta=TOLERANCE_S)   # the fade-out adds no length
+        # The last song runs to the (already quiet) end of its file: only the end is checked here.
+        self.assert_fades_to_silence(result.output_path, actual, loud_before=False)
         self.assertEqual(result.songs_rendered, 3)
         self.assertEqual(media.downloads, 3)   # xg + sewer + sewer-lying; sewer used twice = one download
         errors = " | ".join(self.sink.messages(Level.ERROR))
@@ -143,6 +93,16 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(media.downloads, 0)
         self.assertEqual(again.output_path.name, "2026-09-27_143012_2.mp3")   # never overwrites
 
+    def test_audio_fade_out(self):
+        """The last song is loud up to its end, so the silence at the end is the fade-out's doing."""
+        media = FakeMedia({"fx://xg": (XG, 189.0)})
+        settings = Settings(processing=ProcessingSettings(audio_only=True))
+        result = self.run_pipeline([row(2, "fx://xg", "0:30-0:40")], media, CD_MP3, settings)
+        expected = self.real_length(CD_MP3) + (41 - 29) - 1.0
+        actual = self.real_length(result.output_path)
+        self.assertAlmostEqual(actual, expected, delta=TOLERANCE_S)   # the fade-out adds no length
+        self.assert_fades_to_silence(result.output_path, actual)
+
     def test_video_mirror(self):
         media = FakeMedia({"fx://thai": (THAI_MP4, 8.0)})
         rows = [
@@ -157,7 +117,10 @@ class SmokeTest(unittest.TestCase):
         cd, thai = self.real_length(CD_MP4), self.real_length(THAI_MP4)
         expected = 3 * cd + (6 - 0) + (7 - 1) + (min(thai, 8) - 2) - 5 * 1.0
         self.assertEqual(result.output_path.suffix, ".mp4")
-        self.assertAlmostEqual(self.real_length(result.output_path), expected, delta=TOLERANCE_S)
+        actual = self.real_length(result.output_path)
+        self.assertAlmostEqual(actual, expected, delta=TOLERANCE_S)   # the fade-out adds no length
+        self.assert_fades_to_silence(result.output_path, actual)
+        self.assertLess(self.last_frame_luma(result.output_path), BLACK_LUMA, "the video should end black")
         self.assertEqual(media.downloads, 1)                  # same video three times
         mirror_log = [e.message for e in self.sink.events if e.stage == "measure" and e.level is Level.DEBUG]
         self.assertEqual([m.endswith("mirror True") for m in mirror_log], [True, False, True])

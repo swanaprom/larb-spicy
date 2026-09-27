@@ -88,24 +88,31 @@ class FfmpegProcessor(MediaProcessor):
                              f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS},format=yuv420p"
                              f"{flip},setpts=PTS-STARTPTS[v{i}]")
         n, d = len(plan.segments), plan.crossfade_s
-        if n == 1:
-            lines.append("[a0]anull[aout]")
-            if video:
-                lines.append("[v0]null[vout]")
         # acrossfade needs no lengths; xfade needs the offset of each join,
         # which is why every segment's length must be known up front.
         prev_a, prev_v, length = "a0", "v0", plan.segments[0].duration_s
         for i in range(1, n):
-            last = i == n - 1
-            out_a = "aout" if last else f"ax{i}"
-            lines.append(f"[{prev_a}][a{i}]acrossfade=d={d}:c1=tri:c2=tri[{out_a}]")
-            prev_a = out_a
+            lines.append(f"[{prev_a}][a{i}]acrossfade=d={d}:c1=tri:c2=tri[ax{i}]")
+            prev_a = f"ax{i}"
             if video:
-                out_v = "vout" if last else f"vx{i}"
                 lines.append(f"[{prev_v}][v{i}]xfade=transition=fade:duration={d}"
-                             f":offset={length - d:.3f}[{out_v}]")
-                prev_v = out_v
+                             f":offset={length - d:.3f}[vx{i}]")
+                prev_v = f"vx{i}"
             length += plan.segments[i].duration_s - d
+
+        # End fade-out: the last fade_out_s seconds fade to silence and to black,
+        # ending exactly at the end. The fades only change volume and brightness,
+        # so the length stays the same.
+        f = plan.fade_out_s
+        if f > 0:
+            start = max(length - f, 0.0)
+            lines.append(f"[{prev_a}]afade=t=out:st={start:.3f}:d={f}[aout]")
+            if video:
+                lines.append(f"[{prev_v}]fade=t=out:st={start:.3f}:d={f}:color=black[vout]")
+        else:
+            lines.append(f"[{prev_a}]anull[aout]")
+            if video:
+                lines.append(f"[{prev_v}]null[vout]")
         return ";\n".join(lines)
 
     def render(self, plan: RenderPlan, output_path: Path) -> Path:
