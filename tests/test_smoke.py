@@ -24,8 +24,7 @@ from larb.core.models import DownloadSettings, Level, ProcessingSettings, Settin
 TOLERANCE_S = 0.1
 # End fade-out checks: the last moment must be (near) silent and (near) black,
 # while a moment before the fade still has sound, so the check can't pass by accident.
-END_WINDOW_S = 0.02     # the last this-many seconds are checked (a linear fade is still ~5 % loud
-                        # 50 ms before the end, too close to SILENT_DB on real songs)
+END_WINDOW_S = 0.02     # the last this-many seconds are checked
 SILENT_DB = -30.0       # peak in the end window must be below this
 BLACK_LUMA = 30         # average brightness of the last frame (0-255; video black is 16). The last
                         # frame starts 1/30 s before the end, so a little picture is left: ~20 measured,

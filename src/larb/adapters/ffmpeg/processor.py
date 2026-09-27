@@ -106,7 +106,9 @@ class FfmpegProcessor(MediaProcessor):
         f = plan.fade_out_s
         if f > 0:
             start = max(length - f, 0.0)
-            lines.append(f"[{prev_a}]afade=t=out:st={start:.3f}:d={f}[aout]")
+            # curve=qua: volume falls with the square of the time left, so the tail is
+            # inaudible sooner than with the default straight line (maintainer choice).
+            lines.append(f"[{prev_a}]afade=t=out:st={start:.3f}:d={f}:curve=qua[aout]")
             if video:
                 lines.append(f"[{prev_v}]fade=t=out:st={start:.3f}:d={f}:color=black[vout]")
         else:
