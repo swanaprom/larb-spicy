@@ -116,7 +116,7 @@ Measured 2026-09-26 with yt-dlp 2026.08.19, one song (`oKBwWQI-IoI`, 162 s), cli
 **Early length check (before downloading)** — `scratch/spike_length_check.py`, worked on attempt 1:
 - `YoutubeDL.extract_info(url, download=False)` returns metadata only; `info["duration"]` is the video length. It takes **0.4–2.7 s per row**, with no media downloaded. That means an "end time past song length" row can be rejected at manifest validation, before any download. [found 2026-09-26]
 - Caught correctly: synthetic `100–9999` on a 162 s video → error; unavailable ID → `DownloadError` with a readable message. [found]
-- The same `info` dict can be handed to `ydl.process_ie_result(info, download=True)`, so each video's metadata is fetched only once. [found]
+- The same `info` dict can be handed to `ydl.process_ie_result(info, download=True)`, so each video's metadata is fetched only once. [found] ⚠ **Only on the same `YoutubeDL` instance, or with raw info** (`process=False`): processed info reused by a different instance got 403 on every audio download (slice 2, §14).
 - ⚠ **`duration` is whole seconds, rounded** (metadata 217 vs real file 216.828 s; 162 vs 162.191). An end time within about 0.5 s of the end can pass the metadata check and still overrun the real file. **The early check doesn't replace the ffprobe check after download**; it only catches most bad rows early. [found]
 - **Prefer H.264 sources:** YouTube's default 720p pick was AV1, and software AV1 decoding made the render **2.4× slower** (§10). [found]
 - Always pass `--ffmpeg-location <static bin dir>`: otherwise yt-dlp merges with whatever `ffmpeg` is on PATH (a system FFmpeg exists on this PC). [found]
@@ -255,6 +255,11 @@ Newest first. Date · what was tried · result · where it's now documented.
 
 | Date | Finding | Result | Documented in |
 | ---- | ------- | ------ | ------------- |
+| 2026-09-27 | Audio-only output length vs plan, 3 / 10 / 20 / 71 songs | ~6 ms short **per segment** (Opus sources?); ≥ 10 songs fails the 0.1 s length check → run aborts | §14 |
+| 2026-09-27 | Long list (71 songs) in one pass; FFmpeg peak memory at 2 / 4 / 6 / 10 songs | video: ~0.54 GB per song, 10 songs already > 3.9 GB → 71 in one pass impossible on 16 GB; audio: 0.32 GB, 85 s | §14 |
+| 2026-09-27 | Slice 1 vs slice 2 end to end, live sheet, alternating | audio 21.3 / 19.6 → 14.0 / 14.2 s; video 96.7 / 75.9 → 79.5 / 68.1 s | §14 |
+| 2026-09-27 | Manifest look-ups 1 / 3 / 5 at once, live sheet + 12 videos | 12 videos: 24.1 → 9.4 s (3) → 7.1 s (5) | §14 |
+| 2026-09-27 | Reuse looked-up info for the download | ~1.5 s saved per song; only raw (`process=False`) info works, processed info → 403 | §14 |
 | 2026-09-27 | End fade-out curve: linear → quadratic (`qua`) | last 50 ms −30 dB → −58 dB on the live output | §13 |
 | 2026-09-27 | Slice 1 live runs: countdown URL, `--rows`, end fade-out, log file | all work; linear fade still ~−30 dB in the last 50 ms, last frame luma ~20 | §13 |
 | 2026-09-27 | Plain `python -m unittest` from the repo root | ran **0 tests** (no `tests/__init__.py`); fixed | §13 |
@@ -312,8 +317,8 @@ set PYTHONPATH=src
 - **Minimum FFmpeg is 7.1** (maintainer decision 2026-09-27, replacing SPEC's ≥ 4.3). The renderer passes the filter graph as a file with `-/filter_complex <file>`, which exists from 7.1. The older `-filter_complex_script` fallback was removed rather than kept untested. An older FFmpeg, static or system, is refused with `No usable FFmpeg: version 7.1 or newer is needed … system FFmpeg 4.4.2 (…) is too old` (checked offline in `tests/test_locate.py`). Version strings without a number (dev builds like `N-12345-g…`) are accepted; if one ever lacks the option, FFmpeg itself fails and the run stops with a `RenderError`. [found]
 - **yt-dlp prints its own `ERROR:` line on stderr even with `quiet=True`.** A do-nothing `logger` object in the options silences it; the core logs our own message instead.
 - **Audio-only downloads (`ba/b`) arrive as `.webm` (Opus).** That's fine: the cache keeps the file's own extension (HANDOFF rule).
-- **Each song's metadata is fetched twice** (`lookup` at manifest stage, then again inside `download`), about 1.5–3 s extra per song. The early YouTube check stays (maintainer decision). **Later slice:** the yt-dlp adapter remembers each `lookup` result and reuses it in `download`, with no port change; a retry after a 403 should still fetch fresh metadata (TECH §9).
-- **Manifest look-ups run one at a time** (0.5–3 s per row): roughly 5–10 min for ~300 rows before downloads start. **Later slice:** run look-ups in parallel, like downloads. [known]
+- **Each song's metadata is fetched twice** (`lookup` at manifest stage, then again inside `download`), about 1.5–3 s extra per song. The early YouTube check stays (maintainer decision). → **Done in slice 2** (§14): fetched once, ~1.5 s saved per song.
+- **Manifest look-ups run one at a time** (0.5–3 s per row): roughly 5–10 min for ~300 rows before downloads start. → **Done in slice 2** (§14): parallel, ~2.6× faster at the default 3.
 - The clipped K-pop masters measure a sample peak of exactly 0.0 dB, so peak normalization gives them −1.0 dB. The countdowns get +14 dB.
 - Output is rendered to `<name>.rendering.<ext>` and renamed only on success; a failed render leaves no file under the final name. The graph file is kept in `workspace/tmp/` when a render fails, for debugging.
 - Output length is verified through `MediaProcessor.measure(output, 0, 0.1)`. The tiny range keeps the peak scan cheap, since only the file length is needed. A dedicated "length" method would need a port change. [known]
@@ -363,3 +368,65 @@ set PYTHONPATH=src
 
 **Tests.** `python -m unittest` from the repo root ran **0 tests** before: `tests/` had no `__init__.py`, and discovery only enters packages. Added it; `discover -s tests` still works. Shared fakes live in `tests/fakes.py` (not `test_*.py`, so it isn't collected twice). 26 tests, ~18 s.
 
+## 14. Slice 2 — speed (2026-09-27, branch `slice-2-speed`)
+
+Scripts for the measurements below were throwaway (not committed); inputs are in `workspace/slice2/`: `list12.csv` (the spike matrix's 12 songs, `0:30-1:05` each, in the live sheet's columns) and `long.csv` (the same 12 × 6 different 35 s ranges = 72 rows; row 69 runs past its song, so 71 usable). `workspace/slice2/long_cache/` holds their 720p videos, so the long-list test can be rerun without downloading. i5-6400, home connection, yt-dlp 2026.08.19, no JS runtime.
+
+**Port changes (approved by the maintainer 2026-09-27):** `MediaUnavailableError.retryable` (default False), so look-ups follow the download retry policy; `LogEvent.progress = (done, total)` (default None), so the GUI reads progress from a field, never from message text.
+
+**Look each video up once.** `lookup` remembers the info; `download` reuses it once (then forgets it), in a fresh `YoutubeDL` with the download's own format options, via `process_ie_result(info, download=True)`. Nothing leaves the adapter; the core and the port didn't change for this.
+- ⚠ **Only raw info can be reused.** First try: `extract_info(url, download=False)` (processed: yt-dlp has already picked a format) reused in another `YoutubeDL` → video worked once, but **every audio download got `HTTP Error 403`** (8 of 8, 4 songs × 2 rounds), while fresh downloads of the same songs all worked. Not cookies: copying the look-up's cookie jar into the download's instance still gave 403. What works: the same instance for both (not possible: the port's `lookup` doesn't know the media kind), or **`extract_info(..., process=False)`** (raw info, no format picked) handed to the download's instance. [found]
+- ⚠ With `process=False`, a sheet URL carrying `&list=RDMM…` returns `{"_type": "url", ...}`, a redirect to the video itself, with no length. The adapter follows it (≤ 3 hops) before reading `duration`; otherwise the length check fails and the download would silently look the video up again. `youtu.be/…?si=`, `music.youtube.com` and `/shorts/` give the video directly. Unavailable and truncated IDs fail as before. [found]
+- Reused info picks the same formats as a fresh look-up: video `136+140` (720p H.264 + AAC), audio `251`. [found]
+- Size: raw info is ~0.5 MB per video, ~80 % of it `automatic_captions`. Captions, subtitles and heatmap are dropped before remembering → ~70 KB, ~20 MB for 300 rows. [found]
+- **Fallback to a fresh look-up** (logged at INFO: `... looking it up again`): no remembered info (e.g. the core's own retry, since info is used only once), info older than 1 hour (`REMEMBER_FOR_S`; YouTube's links expire after ~6 h), or a retryable failure with the reused info. In the live runs this happened for 2 of ~20 downloads, both `HTTP Error 403` in video mode, both fixed by the fresh look-up without using one of the core's retries. That's the usual intermittent 403 (§9), not something reuse causes: 12 of 12 reused audio downloads worked in the timing test below. [found]
+- **Time saved:** audio downloads of the 12 songs, alternating reused vs fresh (slice 1 behaviour): reused **1.65 s**, fresh **3.17 s** mean → **~1.5 s saved per song** (median 1.44 s). One fresh download hit the intermittent 403 (excluded). [found]
+- Live log (DEBUG, in the log file): `looked up <id> in 2.1 s` once per song, then `downloading <id> with the looked-up info`. [found]
+
+**Parallel look-ups.** `max_parallel_downloads` workers (no new key), retries as for downloads (`max_retries`, pause 1 s × attempt); the countdown's look-up is retried too. Each row's messages are collected in its worker and reported through `pool.map`, which returns in sheet order however rows finish; offline row errors are checked in the workers as well, so every row gets one progress event. Manifest stage only (`Pipeline._build_manifest` with the real adapters), 3 interleaved rounds each: [found]
+
+| List | 1 at a time | 3 at once (default) | 5 at once |
+| --- | --- | --- | --- |
+| Live sheet, 3 rows | 5.9 / 5.6 / 5.9 s | 2.3 / 2.2 / 2.3 s (**2.5×**) | 2.4 / 2.3 / 2.6 s |
+| 12 different videos | 24.4 / 23.5 / 24.4 s | 9.5 / 9.0 / 9.6 s (**2.6×**) | 7.4 / 6.7 / 7.2 s (**3.4×**) |
+
+- Very steady (unlike downloads). A single look-up gets slightly slower with more at once (2.0 → 2.2 → 2.5 s), but the total still drops. With 3 rows, 3 and 5 are the same (all rows at once). 72 rows at 3 at once: 56 s. No look-up needed a retry in any run. [found]
+- Look-ups behave like audio downloads (latency-bound), so 5 would be faster than the default 3; `max_parallel_downloads` is tuned for video downloads (§9). One key for both is the maintainer's decision (CLAUDE.md slice 2 scope). [found → maintainer]
+
+**Progress.** A `LogEvent` with `progress=(0, N)` when checking starts, then one `progress=(done, N)` per row as it finishes (console: `row 14: checked 12/40`). Progress events come in finishing order; the row results after them are in sheet order. [found]
+
+**End to end, slice 1 (`main`) vs slice 2**, live sheet (3 songs + URL countdown), each run from its own empty cache, alternated slice 1 → 2 → 1 → 2: [found]
+
+| Mode | slice 1 | slice 2 |
+| --- | --- | --- |
+| Audio | 21.3 s, 19.6 s | **14.0 s, 14.2 s** |
+| Video 720p | 96.7 s (1 retry, slow 52 s render), 75.9 s | **79.5 s, 68.1 s** |
+
+Every run passed the length check (audio 138.99 s vs 139.02 s planned, video 139.17 vs 139.16 s). Manifest stage 4 s → 2–3 s. Video is dominated by download bandwidth and the render, so the ~1.5 s per song saved matters less there.
+
+**Long list in one pass (≥ 60 songs), measured, not built.** No chunking code was written (slice scope). Memory is Windows' `PeakWorkingSetSize` of the FFmpeg render process (earlier try: 2 s sampling). A safety stop killed the run when the system's free memory fell below 1–1.5 GB. The PC has 15.9 GB, but only **2–5 GB was free** during these runs (browser, editor). [found]
+
+| Mode | Songs (inputs) | FFmpeg peak | Render | Result |
+| --- | --- | --- | --- | --- |
+| Video 720p | 2 (5) | 0.91 GB | 20.5 s | ok, exact length |
+| Video 720p | 4 (9) | 2.02 GB | 35.5 s | ok, exact length |
+| Video 720p | 6 (13) | 3.08 GB | 49.4 s | ok, exact length |
+| Video 720p | 10 (21) | > 3.89 GB | — | **safety stop** (free 1.0 GB) |
+| Video 720p | 71 (143) | > 1.92 GB after ~1 min, output still 0 bytes | — | **safety stop** (free 1.0 GB) |
+| Audio | 71 (143) | 0.32 GB | 85 s | rendered, but **rejected by the length check** (below) |
+
+- ⚠ **Video: FFmpeg memory grows ~0.54 GB per song** (≈ 0.27 GB per input: 5 → 13 inputs, 0.91 → 3.08 GB), and it keeps rising during the render (6 songs: 1.7 GB at 2 s, 3.1 GB at 45 s), so it's not only a start-up cost. Extrapolated: 10 songs ≈ 5.3 GB, 71 songs ≈ 38 GB. **A one-pass video render of a long list can't work on this PC**, and even 10 songs needs more than ~4 GB free. The spike's 10-song one-pass render (§10) worked, most likely with more memory free. Cause not investigated. Likely: every input is opened and decoded at once, and decoded 720p frames (~1.4 MB each) pile up for inputs the crossfade chain isn't reading yet. Untested ideas: fewer decoder threads per input (`-threads 1` before each `-i`), or chunking (method C, §10), which would also bound memory: at ~0.54 GB per song, ~6 songs per chunk stays near 3 GB. [found → maintainer]
+- **Audio in one pass: fast and small** (0.32 GB, 85 s for 71 songs, a 47.8 min output). Audio doesn't need chunking for memory or time (§10). [found]
+- ⚠ **Audio-only output is short by ~6 ms per segment**, so the length check (tolerance 0.1 s) rejects any audio run of about 10 songs or more and the run aborts:
+
+  | Songs (segments) | Planned | Actual | Short by | Per segment |
+  | --- | --- | --- | --- | --- |
+  | 3 (7), live sheet | 139.02 s | 138.99 s | 0.03 s | 4.3 ms |
+  | 10 (21) | 404.41 s | 404.29 s | 0.12 s ✗ | 5.7 ms |
+  | 20 (41) | 807.82 s | 807.58 s | 0.24 s ✗ | 5.9 ms |
+  | 71 (143) | 2865.21 s | 2864.36 s | 0.85 s ✗ | 5.9 ms |
+
+  Video mode (AAC audio from `.mp4`) matches within 0.01 s, and the spike's 10-song audio test was exact (§10). Audio mode downloads Opus (`.webm`, §12). **Suspected cause [verify]: Opus pre-skip / seek pre-roll.** Opus has a 312-sample (6.5 ms) start delay, which input-side `-ss` seeking may drop at every segment. Not fixed here: the render recipe and the audio download format are both outside this slice. Existing behaviour, same in slice 1. [found → maintainer]
+- ⚠ When the length check rejects a render, the file stays in the output folder under its **final name** (the rename happens before the check). Only a failed FFmpeg run leaves no file (§12). [found → maintainer]
+
+**Tests.** 41 tests (+15), ~35 s. `tests/test_manifest_parallel.py`: fake look-ups with delays, so rows finish out of order. It checks that results are in sheet order, each row error is on its row, one progress event per row, permanent errors aren't retried, retryable ones give up after `max_retries`, one at a time really is one at a time, and countdown look-up retries. `tests/test_ytdlp_reuse.py`: yt-dlp replaced by a fake, covering reuse, the `&list=` redirect, info used only once, and the fallbacks (none, expired, failed with 403), plus not repeating a permanent failure and the retryable flag on look-up errors.

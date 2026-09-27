@@ -25,6 +25,12 @@ There's a hack:
 - The song title and artist are **not** in the name, so fixing a typo in the sheet doesn't cause a re-download. Titles show up in the log instead.
 - An audio-only file doesn't count for a video run, and the other way round, because the `<kind>` part differs.
 
+## Each video is looked up once — keep `process=False`
+
+While checking the sheet, the yt-dlp adapter looks each video up and remembers the answer; the download then reuses it instead of asking YouTube again (~1.5 s saved per song). This only works because the look-up asks yt-dlp for the **raw** info (`extract_info(..., process=False)`). Info that yt-dlp has already "processed" (formats picked) failed with `HTTP Error 403` on every audio download tried when reused. So don't "simplify" the look-up back to a plain `extract_info(url, download=False)`. Details: [TECH.md](TECH.md) §14.
+
+If a reused look-up fails anyway, the adapter looks the video up again by itself and logs `... looking it up again`. That line is normal now and then (YouTube's intermittent 403), not a bug.
+
 ## Rendering looks wrong but no error?
 
 FFmpeg does **not** fail when a song's end time is past the real length of the video. It quietly makes a broken, out-of-sync file. Song lengths must be checked before rendering (see TECH.md §10). The YouTube metadata length is rounded to whole seconds, so the early check alone is not enough.
