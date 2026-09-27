@@ -15,6 +15,8 @@ def validate_settings(settings: Settings) -> None:
 
     if d.max_parallel_downloads < 1:
         problems.append(f"download.max_parallel_downloads must be 1 or more (got {d.max_parallel_downloads})")
+    if d.max_parallel_lookups < 1:
+        problems.append(f"download.max_parallel_lookups must be 1 or more (got {d.max_parallel_lookups})")
     if d.max_retries < 0:
         problems.append(f"download.max_retries must be 0 or more (got {d.max_retries})")
     if not 144 <= d.max_height <= 4320:

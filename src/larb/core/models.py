@@ -28,6 +28,7 @@ class DownloadSettings:
     max_parallel_downloads: int = 3
     max_retries: int = 2
     max_height: int = 720
+    max_parallel_lookups: int = 5
 
 
 @dataclass(frozen=True)

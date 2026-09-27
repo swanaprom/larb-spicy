@@ -20,7 +20,7 @@ TOLERANCE_S = 0.1
 
 def settings(parallel=3):
     return Settings(processing=ProcessingSettings(audio_only=True),
-                    download=DownloadSettings(max_parallel_downloads=parallel, max_retries=2))
+                    download=DownloadSettings(max_parallel_lookups=parallel, max_retries=2))
 
 
 # Rows 2 and 4 are slow, so rows after them finish first.
@@ -118,6 +118,14 @@ class ParallelManifestTest(PipelineTestCase):
         self.assertEqual(media.max_concurrent_lookups, 1)
         finished = [e.row_number for e in self.progress_events() if e.progress[0] > 0]
         self.assertEqual(finished, sorted(finished))
+
+    def test_lookups_use_their_own_limit(self):
+        media = FakeMedia(MEDIA_TABLE, lookup_delays=DELAYS)
+        s = Settings(processing=ProcessingSettings(audio_only=True),
+                     download=DownloadSettings(max_parallel_downloads=1, max_parallel_lookups=4))
+        self.run_pipeline(ROWS, media, CD_MP3, s)
+        self.assertGreater(media.max_concurrent_lookups, 1)   # not held to max_parallel_downloads
+        self.assertLessEqual(media.max_concurrent_lookups, 4)
 
     def test_countdown_lookup_is_retried(self):
         media = FakeMedia({**MEDIA_TABLE, "https://cd": (CD_MP3, 6.0)}, lookup_fail_first={"https://cd"})

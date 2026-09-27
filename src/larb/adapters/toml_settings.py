@@ -98,7 +98,8 @@ class TomlSettingsStore(SettingsStore):
         d = settings.download
         doc.setdefault("download", {}).update(cache_directory=d.cache_directory,
                                               max_parallel_downloads=d.max_parallel_downloads,
-                                              max_retries=d.max_retries, max_height=d.max_height)
+                                              max_retries=d.max_retries, max_height=d.max_height,
+                                              max_parallel_lookups=d.max_parallel_lookups)
         p = settings.processing
         doc.setdefault("processing", {}).update(audio_only=p.audio_only, mirror=p.mirror,
                                                 crossfade_duration_seconds=p.crossfade_duration_seconds)
@@ -137,7 +138,8 @@ class TomlSettingsStore(SettingsStore):
             download=DownloadSettings(get("download", "cache_directory", str),
                                       get("download", "max_parallel_downloads", int),
                                       get("download", "max_retries", int),
-                                      get("download", "max_height", int)),
+                                      get("download", "max_height", int),
+                                      max_parallel_lookups=get("download", "max_parallel_lookups", int)),
             processing=ProcessingSettings(get("processing", "audio_only", bool),
                                           get("processing", "mirror", bool),
                                           get("processing", "crossfade_duration_seconds", float)),

@@ -171,14 +171,14 @@ class Pipeline:
         return path
 
     def _build_manifest(self, rows: list[SheetRow], dl: DownloadSettings) -> list[ManifestEntry]:
-        """Check every row, looking videos up max_parallel_downloads at a time.
+        """Check every row, looking videos up max_parallel_lookups at a time.
 
         Rows finish in any order, but their results, errors and warnings are
         reported in sheet order. A progress event goes out as each row finishes.
         """
         total = len(rows)
         self._log(Level.INFO, "manifest", f"Checking {total} row(s), "
-                  f"up to {dl.max_parallel_downloads} at once", progress=(0, total))
+                  f"up to {dl.max_parallel_lookups} at once", progress=(0, total))
         done = 0
         done_lock = threading.Lock()
 
@@ -192,7 +192,7 @@ class Pipeline:
             return result
 
         entries = []
-        with ThreadPoolExecutor(max_workers=dl.max_parallel_downloads) as pool:
+        with ThreadPoolExecutor(max_workers=dl.max_parallel_lookups) as pool:
             # map() hands the results back in the order of `rows`, however they finish.
             for result in pool.map(check, rows):
                 for level, message in result.messages:
