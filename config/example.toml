@@ -8,8 +8,10 @@ default_files = []
 
 [download]
 cache_directory = ""
-max_parallel_downloads = 3   # file-only. Tested best for video; more is slower on a full connection (TECH §9)
-max_retries = 2              # file-only. Retries per song before it becomes a row error (TECH §9)
+max_parallel_downloads = 3   # file-only. Also the limit for song look-ups while checking the sheet.
+                             # Tested best for video; more is slower on a full connection (TECH §9).
+max_retries = 2              # file-only. Retries per song (look-up and download) before it becomes
+                             # a row error (TECH §9)
 max_height = 720             # file-only. Largest video height to download, in pixels (720 = "720p").
                              # Also sets the output height, so video is never upscaled.
 # Codec preference when downloading (prefer H.264) is hard-coded in the downloader adapter:
