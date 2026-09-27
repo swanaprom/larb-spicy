@@ -173,10 +173,19 @@ class Level(Enum):
 
 @dataclass(frozen=True)
 class LogEvent:
+    """One thing that happened, for the console, the log file and the GUI.
+
+    Attributes:
+        progress: (done, total) when the event reports progress through a stage,
+            e.g. (12, 40) for "checked 12 of 40 rows". The GUI reads this field,
+            never the message text. None for ordinary events.
+    """
+
     level: Level
     stage: str
     message: str
     row_number: int | None = None
+    progress: tuple[int, int] | None = None
 
 
 # ---------------------------------------------------------------------------

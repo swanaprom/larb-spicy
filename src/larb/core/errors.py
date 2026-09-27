@@ -22,7 +22,16 @@ class SongListError(LarbError):
 
 
 class MediaUnavailableError(LarbError):
-    """A video doesn't exist or can't be accessed. Becomes a row error."""
+    """A video can't be looked up. Becomes a row error (after retries, if retryable).
+
+    Attributes:
+        retryable: True when trying again might work (e.g. a network hiccup).
+            False when it never will (the video doesn't exist, is private, ...).
+    """
+
+    def __init__(self, message: str, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class DownloadError(LarbError):

@@ -55,8 +55,11 @@ class MediaSource(ABC):
     def lookup(self, url: str) -> MediaInfo:
         """Return the video's ID, title and (rounded) length, without downloading it.
 
+        Must be safe to call from several threads at once.
+
         Raises:
             MediaUnavailableError: The video doesn't exist or can't be accessed.
+                Its `retryable` flag says whether trying again might help.
         """
 
     @abstractmethod
