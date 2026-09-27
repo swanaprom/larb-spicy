@@ -22,8 +22,10 @@ from larb.core.models import Level, LogEvent
 from larb.core.pipeline import Pipeline
 
 ROOT = Path(__file__).resolve().parents[2]      # the repository folder
-WORKSPACE = ROOT / "workspace"                  # all runtime files go here (CLAUDE.md)
-CONFIG_FILE = WORKSPACE / "config.toml"
+WORKSPACE = ROOT / "workspace"                  # default home of runtime files (cache, output, tmp)
+# Not in workspace/: that folder gets deleted to free space, and settings must survive it.
+# config/config.toml is gitignored; config/example.toml is its committed template.
+CONFIG_FILE = ROOT / "config" / "config.toml"
 TEMPLATE_FILE = ROOT / "config" / "example.toml"
 
 
