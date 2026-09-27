@@ -57,7 +57,8 @@ Record answers in §11 Findings log, then update the relevant section below.
 
 ## 4. Sheet access (CSV export URL)
 
-- A non-public sheet returns an **HTML sign-in page with a success status**, not an HTTP error. Check the response is actually CSV (e.g. body doesn't start with `<`, sensible content type) before parsing; abort with "sheet isn't publicly viewable". [known]
+- A non-public sheet: tested 2026-09-27, the CSV export URL returned **HTTP 401**, which the adapter reports as `The sheet can't be read (HTTP 401). Is it shared as 'Anyone with the link'?` and the run aborts. [found] Older reports say Google may instead answer with an **HTML sign-in page and a success status**, so the adapter also checks that the response really is CSV (content type, body not starting with `<`). Keep both checks. [known, not reproduced]
+- Header mismatch: tested 2026-09-27 with a sheet whose artist column is `ชื่อศิลปิน` instead of `ศิลปิน`. The run aborts before any download, naming the missing header and listing the headers found. [found]
 - Special-character / encoding handling already solved in the prototype script — port it over **with a comment explaining why it exists**, so nobody deletes it as unnecessary. [found — prototype]
 - Local CSV file path is the fallback input (SPEC §9 stage 2).
 - Current sheet layout (2026-09): `ชื่อเพลง, ศิลปิน, URLs, ช่วงเวลา, ผู้เสนอเพลง + ชั้นปี, Mirrored แล้ว, หมายเหตุ` → URL index 2, time range index 3. People type stray spaces inside numbers (`1. 04`, `0.4 6-1:3 0`), so strip **all** whitespace before parsing a time range. The moviepy-era CSV used `HH:MM:SS` in separate start/end columns instead. [found 2026-09-26]
@@ -254,6 +255,7 @@ Newest first. Date · what was tried · result · where it's now documented.
 
 | Date | Finding | Result | Documented in |
 | ---- | ------- | ------ | ------------- |
+| 2026-09-27 | Private sheet and header-mismatch sheet, live | private → HTTP 401 (not an HTML page); both abort before download with clear messages | §4 |
 | 2026-09-27 | FFmpeg minimum raised to 7.1; settings file moved to `config/config.toml` | old FFmpeg refused with clear message (offline test); live run reads new path | §3, §12 |
 | 2026-09-27 | Walking skeleton on live sheet (3 songs), audio + video | length checks pass; mirror rule confirmed from frames; cached re-run downloads nothing; real 403 fixed by retry | §12 |
 | 2026-09-27 | yt-dlp prints errors despite `quiet` | silent `logger` option | §12 |
