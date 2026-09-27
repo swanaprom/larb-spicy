@@ -79,7 +79,7 @@ Adapters can be replaced without touching the core, as long as the port stays th
 |Video/audio download|`yt-dlp` (always latest, not pinned)|replaces `moviepy` download path from prototype. The only unpinned dependency — see §16|
 |FFmpeg binary|pip-bundled binary (`static-ffmpeg`), **FFmpeg 7.1 or newer**|Lives in the venv, pinned with it, no admin rights needed. Fallback: a system FFmpeg, if it's 7.1 or newer; else prompt the operator to install one. Why 7.1: long song lists need an option only 7.1+ has, and one version rule means one tested code path. An older FFmpeg stops the run with a clear "too old" message|
 |JS runtime (Deno / Node)|**Not required** — add only if yt-dlp actually breaks without one|2026-09 spike: downloads work without one (yt-dlp prints a deprecation warning). Node also works if passed explicitly. If it ever becomes necessary, same handling as system-bound FFmpeg (check + ask). Note kept in HANDOFF.md|
-|Trim / mirror / crossfade|FFmpeg via `subprocess`, through one internal helper module; **whole compilation rendered in one pass**|Helper owns every FFmpeg call, keeps binary path separate from the argument list. One pass confirmed in the spike (exact lengths, A/V in sync). Very long video lists are rendered in chunks and joined without re-encoding (TECH §10)|
+|Trim / mirror / crossfade|FFmpeg via `subprocess`, through one internal helper module. **Audio: one pass. Video: small fixed chunks, joined (planned, slice 3)**|Helper owns every FFmpeg call, keeps binary path separate from the argument list. One pass gives exact lengths and A/V sync, but for video it opens every song at once and needs about 0.5 GB of memory per song (measured 2026-09), so it fails after ~6–8 songs on a low-mid PC. Chunking with the tested hybrid method (TECH §10) keeps memory flat for any list length at about 10% extra time; used always, so there is one code path. Audio one pass used 0.32 GB for 71 songs|
 |GUI framework|Tkinter (`ttk`)|Zero dependencies (nothing to pin, nothing that can vanish from PyPI), most examples for AI-assisted successors, and enough styling (colors, fonts, log tags) for the actual UI. Rejected: Qt/PySide6 (heavy + licensing questions), CustomTkinter (third-party, risks lagging a Python bump), PySimpleGUI (now needs a license key).|
 |Config format|TOML — `tomllib` (read, 3.11+) + `tomli-w` (write, pinned)|Python has no built-in TOML writer. But align best among the goals.|
 |Sheet access|Public CSV export URL + standard library (`csv`)|No credentials to inherit or expire, no Google Cloud console for a successor, already tested including the special-character/encoding fix. Matches the §3 non-goal on sharing settings. Local CSV file stays as fallback (§9 stage 2). Rejected API + service account: only buys private-sheet reads and write-back, neither needed. Revisit if writing back to the sheet is ever wanted|
@@ -110,7 +110,9 @@ cache_directory = ""     # empty = workspace/cache/. Change only if that disk is
                          # point it at a NEW, EMPTY folder used only by this program (never an existing
                          # folder with other files: clearing the cache deletes files by name pattern, §10).
 max_parallel_downloads = 3   # file-only. Tested best for video; more is slower on a full connection (TECH §9)
-max_retries = 2              # file-only. Retries per song before it becomes a row error (TECH §9)
+max_retries = 2              # file-only. Retries per song, for both look-ups and downloads, before it becomes a row error (TECH §9)
+max_parallel_lookups = 5     # file-only. YouTube checks at once while building the manifest. Separate from downloads:
+                             # look-ups wait on YouTube, not bandwidth, so more at once helps (measured 2026-09)
 max_height = 720             # file-only. Largest video height to download, in pixels (720 = "720p").
                              # Also the output height: output is never taller than this. Even number, 144–4320.
 # Codec preference when downloading (prefer H.264) is hard-coded in the downloader adapter:
@@ -161,7 +163,7 @@ Current sheet layout (2026-09), in order: `ชื่อเพลง` (song title
 |Time range|Yes|`m:ss-m:ss` or `h:mm:ss-h:mm:ss`; `.` is accepted as the separator, since people type it; any dash type (`-`, `–`, `—`, as phones insert). Stray spaces inside numbers are ignored. Seconds must be two digits (`1.5` is ambiguous). start < end, and **end ≤ the video's length on YouTube**|row error, skip row, report reason|
 |Mirrored แล้ว|No|empty or only spaces = not mirrored yet; anything else (any text or symbol) = already mirrored|— (used by the Mirror rule below)|
 
-Note: because the URL and length checks ask YouTube, building the manifest needs internet and takes roughly 0.5–3 s per row. It still happens before any download, so a bad row never costs a download.
+Note: because the URL and length checks ask YouTube, building the manifest needs internet. With `max_parallel_lookups` at once it averages about 0.6 s per row (2026-09: 12 rows in about 7 s), so a 300-row list takes a few minutes. It still happens before any download, so a bad row never costs a download.
 
 **Row range:** a run can be limited to part of the sheet, e.g. rows `2-40` today and `41-80` tomorrow, so a long list can be done in sections. Rows are numbered exactly as Google Sheets shows them (the header is row 1, so the first song is row 2). A single number such as `5` means `5-5`. No range = all rows. A backwards range, or one outside the sheet, stops the run with a message naming the problem. Operators set it in the GUI (a first-row / last-row field); on the command line it's `--rows first-last`.
 
@@ -186,10 +188,10 @@ Turn your numbered usage scenario into a state machine / stage list with **input
 |1. Lock settings|(run start signal?)|settings frozen for this run|—|
 |2. Fetch sheet|Sheet URL (or a local CSV if the live fetch fails), row range (§8)|raw rows, limited to the row range|bad row range → abort with a message. Sheet unreachable/private (e.g. HTTP 401: asks whether it's shared as "Anyone with the link"), or a `[sheet.columns]` header not found (names the missing header and lists the ones found) → abort run before any download. Both verified against Google (TECH §4)|
 |3. Prepare countdown|countdown choice (§7): URL or local file|cached countdown media|A URL is looked up and downloaded like a song (same retry policy, same cache key). Still failing after retries → **abort the run**: every song needs a countdown before it. Done _before_ the manifest on purpose: one lookup up front means a bad countdown fails in seconds, not after minutes of row checks|
-|4. Build manifest|raw rows + video info from YouTube (no download)|validated manifest + per-row errors/warnings|see §8|
+|4. Build manifest|raw rows + video info from YouTube (no download)|validated manifest + per-row errors/warnings, plus a progress event per row|see §8. Look-ups run up to `max_parallel_lookups` at once and are retried up to `max_retries` times, but only when a retry could help (a network hiccup, not a removed video). Results, errors and warnings are always reported **in sheet order**, even though rows finish out of order. Each video is looked up once; the download reuses that information|
 |5. Download songs|manifest URLs|cached song media|skip if already cached (resume-safe). Up to `max_parallel_downloads` at once; retry each up to `max_retries` times, then row error.|
 |6. Check & measure|cached media, time ranges|real length + loudness peak of each clip|YouTube's length is rounded to whole seconds, so the real file is re-checked. End time past the real length by **about 1 s or less → trim to fit, row warning**. More than that → row error, skip. A (nearly) silent clip (peak ≤ −60 dB) gets no volume boost and a row warning|
-|7. Render (one pass)|countdown + songs in sequence, settings|final output file|Trim with padding, mirror (per §8 Mirror rule), peak normalization (always on), crossfades and countdowns all in one FFmpeg run. Protocol: if a specific song is known bad, warn and skip it; don't kill the whole compilation. **End fade-out:** the last song fades to silence and to black over the crossfade duration, ending exactly at the end of the output, which keeps its planned length. Hard-coded, no setting. The core decides the fade (it's part of the render plan); the renderer applies it, with a curved audio fade so the very end is fully silent|
+|7. Render|countdown + songs in sequence, settings|final output file|Trim with padding, mirror (per §8 Mirror rule), peak normalization (always on), crossfades and countdowns. Audio in one FFmpeg run; video in chunks (planned, slice 3, see §6). Afterwards the output length is checked against the plan. Protocol: if a specific song is known bad, warn and skip it; don't kill the whole compilation. **End fade-out:** the last song fades to silence and to black over the crossfade duration, ending exactly at the end of the output, which keeps its planned length. Hard-coded, no setting. The core decides the fade (it's part of the render plan); the renderer applies it, with a curved audio fade so the very end is fully silent|
 |8. Unlock GUI|(run end signal?)|settings GUI and TOML editable again|—|
 
 ## 10. Caching Strategy
@@ -243,6 +245,10 @@ Running list — append here instead of losing the thought between sessions.
 - Google Sheet cloned from private Gmail instead of group Gmail — operator error, not enforced in code. Revisit if it becomes a recurring problem.
 - YouTube reports song length rounded to whole seconds, so the early check (§8) can't catch every overrun; the after-download check (§9 stage 6) stays as the second guard.
 - Sheet column mapping is file-only for now (§7). A future generation can expose it in the GUI if the sheet layout changes often.
+- **Known issues, to be fixed in slice 3 (long lists):**
+    - Audio runs of about 10 songs or more fail the output length check: each audio segment comes out about 6 ms short, and it adds up. Planned fix: force each segment to its exact planned length in the render.
+    - Video in one pass runs out of memory after roughly 6–8 songs on a low-mid PC. Planned fix: chunking (§6).
+    - An output rejected by the length check keeps its normal file name, so it looks like a good result. Planned fix: render to a temporary name, and give it the final name only after the check passes; a rejected one is named `..._FAILED`.
 - TODO: name of the Python version-range file read by both scripts.
 
 ## 15. Repository & Version Control
