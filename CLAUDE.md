@@ -4,7 +4,33 @@ Random Dance combiner: reads a song list from a Google Sheet, downloads the YouT
 
 ## Current phase
 
-No active slice.
+**SLICE 3 — long lists**, branch `slice-3-long-lists`. Goal: a real 300-song list works in both modes. No port changes expected (see TECH §15); if one turns out to be needed, propose it and stop.
+
+Scope, in this order:
+
+1. **Countdown default.** Put the default countdown URL (from `CLAUDE.local.md`) into `config/example.toml` as `default_urls = ["..."]`, so a fresh install works without `--countdown`. `default_files` stays empty: files in `tests/` are never runtime defaults. (Maintainer approves this template change.)
+2. **Audio length fix.** First confirm the cause: 20 segments from Opus vs AAC sources, as proposed in TECH §15. Then force each audio segment to its exact planned length in the render. If the cause is confirmed as the seek dropping the start delay, also start each seek 0.5 s early and trim exactly, so the audio *content* lines up, not just the length.
+3. **Only a checked output gets the real name.** The core renders to `<name>.rendering.<ext>`, checks the length, then renames it to the final name on success or to `<name>_FAILED.<ext>` on failure. At the start of each run, delete leftover `*.rendering.*` files in the output folder, and **only that exact pattern**.
+4. **Video chunking.**
+   - First, run the `-threads 1` memory test on 2/4/6 songs and report it.
+   - Then choose one **hard-coded** chunk size so FFmpeg's peak memory stays under about 2 GB on this PC. Use it **always** for video, with the hybrid method (TECH §10). Audio stays one pass.
+   - Chunking lives inside the FFmpeg adapter.
+
+Acceptance:
+
+1. **Countdown:** a run using a fresh `config.toml` generated from `example.toml`, with no `--countdown`, uses the default URL and succeeds.
+2. **Audio:** the 71-song list in `workspace/slice2/` renders in audio mode and passes the length check. An offline test with at least 20 fixture segments fails before the fix and passes after. Report the confirmed cause.
+3. **Output naming:** offline tests cover it:
+   - a forced length mismatch gives only a `_FAILED` file, with no file under the final name;
+   - success gives only the final name, with no temporary file left behind;
+   - a leftover `.rendering` file is removed at the next run start, and other files in the folder are untouched.
+4. **Video:**
+   - The 71-song list renders to completion, with peak memory under about 2 GB and the output length matching the plan. Report the render time.
+   - An offline test with fixtures split across at least 2 chunks matches its planned length.
+5. **Maintainer checks** (report the file names):
+   - Listen near the end of the long audio output: countdowns still line up with the songs.
+   - Watch a few chunk joins in the long video: no glitch or jump at the joins.
+6. **No regressions:** all tests pass. One live audio and one live video run on the sheet succeed, with lengths matching. The 3-song video time is at most about 15% slower than slice 2 (the chunking overhead).
 
 How every slice works:
 1. Work only on the slice's branch, created from an up-to-date `main`.
