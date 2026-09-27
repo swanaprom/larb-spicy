@@ -255,6 +255,8 @@ Newest first. Date · what was tried · result · where it's now documented.
 
 | Date | Finding | Result | Documented in |
 | ---- | ------- | ------ | ------------- |
+| 2026-09-27 | Slice 1 live runs: countdown URL, `--rows`, end fade-out, log file | all work; fade reaches ~−30 dB in the last 50 ms (linear), last frame luma ~20 | §13 |
+| 2026-09-27 | Plain `python -m unittest` from the repo root | ran **0 tests** (no `tests/__init__.py`); fixed | §13 |
 | 2026-09-27 | Private sheet and header-mismatch sheet, live | private → HTTP 401 (not an HTML page); both abort before download with clear messages | §4 |
 | 2026-09-27 | FFmpeg minimum raised to 7.1; settings file moved to `config/config.toml` | old FFmpeg refused with clear message (offline test); live run reads new path | §3, §12 |
 | 2026-09-27 | Walking skeleton on live sheet (3 songs), audio + video | length checks pass; mirror rule confirmed from frames; cached re-run downloads nothing; real 403 fixed by retry | §12 |
@@ -329,3 +331,33 @@ set PYTHONPATH=src
 6. **FFmpeg minimum 7.1** and the settings file at `config/config.toml`: see the notes above.
 
 Playback: all skeleton outputs play in Windows' built-in player (checked by the maintainer, 2026-09-27).
+
+## 13. Slice 1 — polish (2026-09-27, branch `slice-1-polish`)
+
+**Run it** (repo root, venv):
+```
+set PYTHONPATH=src
+.venv\Scripts\python.exe -m larb "<sheet URL or CSV>" [--countdown FILE_OR_URL] [--rows 2-10] [--verbose]
+.venv\Scripts\python.exe -m unittest -v
+```
+
+**Countdown from a URL.** `--countdown` is a URL when it starts with `http://` or `https://`, otherwise a file. Without it: `countdown.default_urls[0]`, then `default_files[0]` (`core.pipeline.choose_countdown`). A URL goes through `MediaSource.lookup` + `download` like a song: same cache name (`qW9N8XjUkIE_audio.webm`, `qW9N8XjUkIE_v720.mp4`), same retries, same peak normalization (the live countdown gets +14.2 dB). Unavailable, or still failing after retries → the run aborts. [found]
+- **Order changed (maintainer decision 2026-09-27):** the countdown is prepared **after** the sheet is read and **before** the manifest, so a bad countdown stops the run before minutes of YouTube look-ups. The sheet still comes first, so a bad sheet still aborts before any download. This differs from the SPEC §9 stage order.
+- A cached countdown still costs one `lookup` (~2 s), because the cache name needs the video ID. Same as songs.
+- ⚠ **`default_urls` must be quoted in TOML:** `default_urls = [https://…]` fails with `Invalid value (at line 6, column 17)`; it must be `["https://…"]`. Seen in a hand-edited `config.toml`. The run stops with that message, which is correct but not very friendly. [found]
+
+**End fade-out.** `RenderPlan.fade_out_s` (port change approved 2026-09-27): the core sets it to the crossfade duration, the FFmpeg adapter adds `afade=t=out:st=L−f:d=f` and `fade=t=out:st=L−f:d=f:color=black` after the last join, where `L` is the planned length. The fades only scale samples/pixels, so the length is unchanged (live: 138.99 s vs 139.02 s planned, same as before). [found]
+- Measured on the live outputs: peak −1 dB at 3–2 s before the end, −7 dB over the last 0.5 s, about **−30 dB in the last 50 ms**. `afade`'s default curve is linear (`tri`), so 50 ms before the end the gain is still ~5 %. The offline test therefore checks the last **20 ms** (fixtures: −84 / −50 dB) against −30 dB. [found]
+- Video: average luma of the last frame ~**20** (black = 16) vs ~138 without the fade. The last frame starts 1/30 s before the end, so it's not fully black by design; the test threshold is 30. [found]
+- The tests were checked against a build with the fade forced to 0: both fade tests then fail (end peak −1.7 / −7.3 dB). [found]
+- If the last song is shorter than two crossfades, the fade-out overlaps the join's crossfade. Harmless, just shorter at full volume. [known]
+
+**Row range.** `--rows 2-3`, `--rows 5` (= 5-5); any dash, spaces ignored. Checked in two steps: the form (backwards, header row 1, not a range) before anything runs; the extent after the sheet is read ("outside the sheet: the last song is on row 4"). The last row is the last row **with content**, because the sheet adapter drops fully empty rows; row numbers still match the sheet. Rows outside the range are never looked up. [found]
+
+**Log file.** `workspace/logs/<date>_<time>.log` (`_2`, `_3` … for runs in the same second). Always includes DEBUG (the exact FFmpeg commands), whatever the console shows (maintainer decision). At start, older logs are deleted so the folder never holds more than 5 files, the current run's included. "Newest" is judged by the date/time in the name, not the modified time. Only files named like a log are ever deleted. [found: 7 live runs → 5 logs]
+
+**Cache-clear prompt.** After a successful run, only when both stdin and stdout are a terminal. Enter, anything but `y`/`yes`, Ctrl+C, or closed input = No. Clearing deletes only files named by the cache rule (`<id>_audio.*`, `<id>_v<n>.*`, including leftovers like `.part`, `.f136.mp4`, `.ytdl`), never subfolders or other files, because the operator may point the cache at a shared folder. Limitation: a file the operator named like `my_audio.mp3` matches the rule. [known]
+- Not seen live by Claude: its shell isn't a terminal, so the question is (correctly) never asked there.
+
+**Tests.** `python -m unittest` from the repo root ran **0 tests** before: `tests/` had no `__init__.py`, and discovery only enters packages. Added it; `discover -s tests` still works. Shared fakes live in `tests/fakes.py` (not `test_*.py`, so it isn't collected twice). 26 tests, ~18 s.
+

@@ -33,6 +33,18 @@ FFmpeg does **not** fail when a song's end time is past the real length of the v
 - If you edit `config.toml` in Notepad, a "UTF-8 with BOM" save used to break Python's TOML reader. Reading with `utf-8-sig` fixes it ([[TECH.md]] §5). Keep that in the code, it is not a typo.
 - Comments you type into `config.toml` disappear on the next save. That is normal; the commented reference is `config/example.toml`.
 
+## Something went wrong: where's the log?
+
+Every run writes `workspace/logs/<date>_<time>.log`. It has more than the console: the exact FFmpeg commands, ready to paste into a terminal. Only the 5 newest logs are kept, so copy one somewhere else if you need it later.
+
+## "Clear the download cache?"
+
+Asked after every successful run. Enter means No. Yes deletes only the files named by the cache rule above (and leftovers of interrupted downloads), nothing else in that folder. Say No while you're still fixing the sheet: the next run won't need to download again.
+
+## Countdown from YouTube
+
+The countdown can be a YouTube link (`--countdown <URL>`, or `countdown.default_urls` in `config.toml`). It's downloaded and cached like a song. In `config.toml`, put the link in quotes: `default_urls = ["https://www.youtube.com/watch?v=..."]`. Without quotes the file doesn't load.
+
 ## What are recommended upgrades?
 
 - Expose some configs in TOML as 'Advanced Settings' into GUI, currently hide by design to keep it direct and minimal.
