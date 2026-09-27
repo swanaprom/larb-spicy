@@ -25,6 +25,20 @@ def _is_permanent(message: str) -> bool:
     return any(marker in lowered for marker in _PERMANENT_MARKERS)
 
 
+class _SilentLogger:
+    """yt-dlp prints its errors on stderr even with quiet=True. They're already turned
+    into our own errors (and logged by the core), so drop yt-dlp's copy."""
+
+    def debug(self, msg: str) -> None:
+        pass
+
+    def warning(self, msg: str) -> None:
+        pass
+
+    def error(self, msg: str) -> None:
+        pass
+
+
 def version() -> str:
     """yt-dlp's version: the first suspect when downloads break, so it's logged every run."""
     return yt_dlp.version.__version__
@@ -42,6 +56,7 @@ class YtDlpMediaSource(MediaSource):
     def _base_options(self) -> dict:
         return {
             "quiet": True,
+            "logger": _SilentLogger(),
             "no_warnings": True,     # hides the "no JS runtime" deprecation notice on every call
             "noprogress": True,
             "noplaylist": True,      # sheet URLs often carry "&list=RDMM..."
