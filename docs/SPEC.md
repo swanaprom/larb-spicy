@@ -101,11 +101,14 @@ filename_template = ""   # empty = {date}_{time}. Only {date} and {time} are all
                          # the program appends .mp4 or .mp3. Never overwrites an existing file.
 
 [countdown]
-default_urls = []
-default_files = []
+default_urls = []        # YouTube links, in quotes: ["https://..."]. The first entry is used.
+default_files = []       # local files; the first entry is used if there's no URL.
+# Countdown choice: the run's countdown (GUI field / --countdown) → default_urls[0] → default_files[0] → stop with a message.
 
 [download]
-cache_directory = ""     # empty = workspace/cache/. The operator may choose any folder.
+cache_directory = ""     # empty = workspace/cache/. Change only if that disk is nearly full, and then
+                         # point it at a NEW, EMPTY folder used only by this program (never an existing
+                         # folder with other files: clearing the cache deletes files by name pattern, §10).
 max_parallel_downloads = 3   # file-only. Tested best for video; more is slower on a full connection (TECH §9)
 max_retries = 2              # file-only. Retries per song before it becomes a row error (TECH §9)
 max_height = 720             # file-only. Largest video height to download, in pixels (720 = "720p").
@@ -160,6 +163,8 @@ Current sheet layout (2026-09), in order: `ชื่อเพลง` (song title
 
 Note: because the URL and length checks ask YouTube, building the manifest needs internet and takes roughly 0.5–3 s per row. It still happens before any download, so a bad row never costs a download.
 
+**Row range:** a run can be limited to part of the sheet, e.g. rows `2-40` today and `41-80` tomorrow, so a long list can be done in sections. Rows are numbered exactly as Google Sheets shows them (the header is row 1, so the first song is row 2). A single number such as `5` means `5-5`. No range = all rows. A backwards range, or one outside the sheet, stops the run with a message naming the problem. Operators set it in the GUI (a first-row / last-row field); on the command line it's `--rows first-last`.
+
 **Mirror rule** (`processing.mirror`):
 
 1. `mirror = true` — **mirror everything:** every song ends up mirrored. Rows already marked in `Mirrored แล้ว` are left as they are (not flipped twice); all others get flipped.
@@ -179,12 +184,12 @@ Turn your numbered usage scenario into a state machine / stage list with **input
 |Stage|Input|Output|Failure behavior|
 |---|---|---|---|
 |1. Lock settings|(run start signal?)|settings frozen for this run|—|
-|2. Fetch sheet|Sheet URL, row range (or just plain CSV if it fails to use the live fetch)|raw rows|sheet unreachable/private (e.g. HTTP 401: asks whether it's shared as "Anyone with the link"), or a `[sheet.columns]` header not found (names the missing header and lists the ones found) → abort run before any download. Both verified against Google (TECH §4)|
-|3. Build manifest|raw rows + video info from YouTube (no download)|validated manifest + per-row errors/warnings|see §8|
-|4. Download countdown|countdown URL/file or default|cached countdown media|Use same retry policy as the row below.|
+|2. Fetch sheet|Sheet URL (or a local CSV if the live fetch fails), row range (§8)|raw rows, limited to the row range|bad row range → abort with a message. Sheet unreachable/private (e.g. HTTP 401: asks whether it's shared as "Anyone with the link"), or a `[sheet.columns]` header not found (names the missing header and lists the ones found) → abort run before any download. Both verified against Google (TECH §4)|
+|3. Prepare countdown|countdown choice (§7): URL or local file|cached countdown media|A URL is looked up and downloaded like a song (same retry policy, same cache key). Still failing after retries → **abort the run**: every song needs a countdown before it. Done _before_ the manifest on purpose: one lookup up front means a bad countdown fails in seconds, not after minutes of row checks|
+|4. Build manifest|raw rows + video info from YouTube (no download)|validated manifest + per-row errors/warnings|see §8|
 |5. Download songs|manifest URLs|cached song media|skip if already cached (resume-safe). Up to `max_parallel_downloads` at once; retry each up to `max_retries` times, then row error.|
 |6. Check & measure|cached media, time ranges|real length + loudness peak of each clip|YouTube's length is rounded to whole seconds, so the real file is re-checked. End time past the real length by **about 1 s or less → trim to fit, row warning**. More than that → row error, skip. A (nearly) silent clip (peak ≤ −60 dB) gets no volume boost and a row warning|
-|7. Render (one pass)|countdown + songs in sequence, settings|final output file|Trim with padding, mirror (per §8 Mirror rule), peak normalization (always on), crossfades and countdowns all in one FFmpeg run. Protocol: if a specific song is known bad, warn and skip it; don't kill the whole compilation. **Planned (slice 1):** the last song fades out at the end, audio and video, over the crossfade duration (hard-coded, no setting)|
+|7. Render (one pass)|countdown + songs in sequence, settings|final output file|Trim with padding, mirror (per §8 Mirror rule), peak normalization (always on), crossfades and countdowns all in one FFmpeg run. Protocol: if a specific song is known bad, warn and skip it; don't kill the whole compilation. **End fade-out:** the last song fades to silence and to black over the crossfade duration, ending exactly at the end of the output, which keeps its planned length. Hard-coded, no setting. The core decides the fade (it's part of the render plan); the renderer applies it, with a curved audio fade so the very end is fully silent|
 |8. Unlock GUI|(run end signal?)|settings GUI and TOML editable again|—|
 
 ## 10. Caching Strategy
@@ -193,13 +198,16 @@ Turn your numbered usage scenario into a state machine / stage list with **input
     - No title or artist in the key: titles can contain characters Windows forbids in filenames, and fixing a typo on the sheet would otherwise cause a re-download. Titles appear in the logs instead.
     - The manual-download naming rule (for dropping a file into the cache by hand) is in HANDOFF.md.
 - Cache location: from `[download]`. Default under `workspace/cache/` (gitignored, §15).
-- Invalidation: cache never expires on its own. After each run the operator is asked whether to clear it, since that depends on their machine (plenty of disk and quick iteration, or very limited space). A clear-cache button is also always available in the GUI.
+- Invalidation: cache never expires on its own. After each successful run the operator is asked whether to clear it (default: No), since that depends on their machine (plenty of disk and quick iteration, or very limited space). A clear-cache button is also always available in the GUI.
+- Clearing deletes **only** files named by the cache key rule above, plus leftovers of interrupted downloads, never anything else in the folder. Because it matches by name pattern, the cache must live in a folder of its own (§7): an operator file that happens to fit the pattern would be deleted.
 
 ## 11. Logging & Observability
 
 - Core streams structured log events to GUI in real time (already decided).
 - Define **log levels** and what triggers each (INFO for stage transitions, WARNING for row warnings, ERROR for row errors/aborts).
-- Log file from GUI stream persists to disk per run, always keep 5 latest log (sweet spot between 'collect everything' and 'collect nothing').
+- Every run writes a log file, `workspace/logs/<date>_<time>.log`, named by when the run **started** (not every run produces an output to name it after).
+- The log file always includes debug detail the console hides, above all the exact FFmpeg commands. The console is for the operator watching the run; the file is for whoever investigates afterwards.
+- Only the 5 newest log files are kept, counting the current run's (sweet spot between "collect everything" and "collect nothing"). Older ones are deleted at the start of a run.
 
 ## 12. Output Layout
 
@@ -263,7 +271,7 @@ larb-spicy/
 ├── config/config.toml    # live settings, gitignored
 ├── src/larb/core/        # rules + orchestration, ports, models, errors (stdlib only)
 ├── src/larb/adapters/    # TOML, sheet, yt-dlp, FFmpeg, console
-├── src/larb/cli.py       # entry point: python -m larb <sheet> --countdown <file>
+├── src/larb/cli.py       # entry point: python -m larb <sheet> [--countdown <file or URL>] [--rows first-last]
 ├── tests/                # offline tests
 ├── tests/fixtures/       # tiny clips for the tests
 └── workspace/            # gitignored

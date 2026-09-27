@@ -1,6 +1,6 @@
 # Hand-off Notes
 
-Gotchas for the next maintainer. Details and evidence live in [TECH.md](TECH.md).
+Gotchas for the next maintainer. Details and evidence live in [TECH.md](https://claude.ai/chat/TECH.md).
 
 ## Downloads failing?
 
@@ -9,13 +9,15 @@ Gotchas for the next maintainer. Details and evidence live in [TECH.md](TECH.md)
 
 ## One specific song always error downloading?
 
-There's a hack: 
+There's a hack:
+
 - Download them manually, and put it in cache folder.
 - Rename the downloaded file to match the naming convention.
 - Once the batch begin again, it will count as a cached song and skip the download.
 - It should likely get include into the output eventually.
 
 **Naming convention for cached files:** `<videoID>_<kind>.<ext>`
+
 - `<videoID>` is the 11-character ID from the YouTube link, exactly as written (case matters). For `https://www.youtube.com/watch?v=oKBwWQI-IoI` or `https://youtu.be/oKBwWQI-IoI?si=...`, it's `oKBwWQI-IoI`.
 - `<kind>` is `audio` for audio-only runs, or `v` plus the `max_height` setting for video runs, e.g. `v720`. Use the **setting's** number, even if the file you downloaded is smaller (e.g. only 480p exists: still `v720`).
 - `<ext>` is the file's own extension; don't rename it (`.mp4`, `.m4a`, `.webm`, `.mp3`, …).
@@ -30,7 +32,7 @@ FFmpeg does **not** fail when a song's end time is past the real length of the v
 ## Settings won't save, or won't load?
 
 - Windows refuses to replace `config.toml` while another program has it open (seen as "Access is denied"). Close whatever has it open; the program should retry by itself.
-- If you edit `config.toml` in Notepad, a "UTF-8 with BOM" save used to break Python's TOML reader. Reading with `utf-8-sig` fixes it ([[TECH.md]] §5). Keep that in the code, it is not a typo.
+- If you edit `config.toml` in Notepad, a "UTF-8 with BOM" save used to break Python's TOML reader. Reading with `utf-8-sig` fixes it ([TECH.md](https://claude.ai/chat/TECH.md) §5). Keep that in the code, it is not a typo.
 - Comments you type into `config.toml` disappear on the next save. That is normal; the commented reference is `config/example.toml`.
 
 ## Something went wrong: where's the log?
@@ -40,6 +42,24 @@ Every run writes `workspace/logs/<date>_<time>.log`. It has more than the consol
 ## "Clear the download cache?"
 
 Asked after every successful run. Enter means No. Yes deletes only the files named by the cache rule above (and leftovers of interrupted downloads), nothing else in that folder. Say No while you're still fixing the sheet: the next run won't need to download again.
+
+**Where the cache lives:** leave `cache_directory` empty (it defaults to `workspace/cache/`). Change it only if that disk is nearly full, and then create a **new, empty folder used only by this program**. Never point it at an existing folder like Music or Downloads: clearing works by file-name pattern, so one of your own files that happens to match (e.g. `something_audio.mp3`) would be deleted.
+
+## Running only part of the sheet
+
+Long list? Run it in sections: rows `2-40` today, `41-80` tomorrow (`--rows 2-40` on the command line, or the row fields in the GUI). Row numbers are the ones Google Sheets shows on the left; the header is row 1, so the first song is row 2. A single number (`--rows 5`) runs just that row, handy for re-checking one song. Each section is its own output file, and songs already downloaded stay cached between sections.
+
+## Running it from a terminal
+
+From the project folder, in VS Code's terminal (PowerShell):
+
+```
+.venv\Scripts\Activate.ps1
+$env:PYTHONPATH="src"
+python -m larb "<sheet URL>"
+```
+
+(In the old Command Prompt, the middle line is `set PYTHONPATH=src`; on Linux/Mac, `source .venv/bin/activate` and `export PYTHONPATH=src`.) The setup scripts will replace these steps once they exist.
 
 ## Countdown from YouTube
 

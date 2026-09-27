@@ -6,24 +6,7 @@ Random Dance combiner: reads a song list from a Google Sheet, downloads the YouT
 
 **SLICE 1 — polish**, branch `slice-1-polish`. No new ports expected; if one turns out to be needed, propose it and stop.
 
-Scope, five small features:
-
-1. **Countdown from a URL.** `--countdown` accepts a local file *or* a YouTube URL. Without `--countdown`, use `countdown.default_urls[0]`, then `countdown.default_files[0]`; if none, stop with a clear message.
-   A countdown URL goes through the same MediaSource as songs: looked up, downloaded with the same retry policy, cached with the same key (`<id>_audio` / `<id>_v<height>`), and normalized like songs. Countdowns are still never padded or mirrored.
-   If the countdown can't be found or downloaded after retries, **abort the run** (a compilation can't be built without it).
-2. **End fade-out.** The last song fades out to silence and to black (video) over the crossfade duration, ending exactly at the end of the output. Hard-coded, no setting. The output length must not change.
-3. **Row range.** `--rows <first>-<last>` limits the run to those rows, numbered as shown in Google Sheets (the header is row 1, so the first song is row 2). Without `--rows`, all rows are used. A range that is backwards or outside the sheet stops the run with a clear message.
-4. **Log file.** Every run writes its log events to `workspace/logs/<date>_<time>.log`, the same events as the console. Only the 5 newest log files are kept; older ones are deleted at the start of a run.
-5. **Cache-clear prompt.** After a successful run in an interactive terminal, ask "Clear the download cache? [y/N]". The default (Enter) is No. When not interactive (e.g. in tests), don't ask.
-
-Acceptance:
-
-1. **Countdown URL:** a live run with the countdown URL given in the task works end to end. A second identical run downloads nothing, the countdown included. Also verify that `default_urls` is used when `--countdown` is omitted.
-2. **Fade-out:** in the live video and audio outputs, the maintainer sees and hears the ending fade out. Also add an offline test that checks the end of the output is (near) silent and (near) black, and that the length still matches the plan.
-3. **Row range:** a live run with `--rows 2-3` contains only those two songs (plus countdowns). An offline test covers a backwards range and an out-of-sheet range.
-4. **Log file:** an offline test runs the log rotation with more than 5 existing logs and checks that exactly the 5 newest remain.
-5. **Cache prompt:** it appears after a live run and No keeps the cache. The tests never block on it.
-6. **All tests pass offline**, and one live audio run plus one live video run succeed against the sheet.
+No active slice
 
 How every slice works:
 1. Work only on the slice's branch, created from an up-to-date `main`.
@@ -97,7 +80,7 @@ Where **you** write during development:
 
 ## Running and testing
 
-- Run the program from the repo root with `src` on the path: `set PYTHONPATH=src` (Windows) or `export PYTHONPATH=src`, then `python -m larb <sheet> --countdown <file>`.
+- Run the program from the repo root with `src` on the path. PowerShell: `$env:PYTHONPATH="src"`; Command Prompt: `set PYTHONPATH=src`; Linux/Mac: `export PYTHONPATH=src`. Then `python -m larb <sheet> [--countdown <file or URL>] [--rows first-last]`.
 - Run the tests with `python -m unittest` (standard library; nothing extra to install).
 - Tests run **fully offline**, from `tests/fixtures/` only. No downloading, no YouTube calls, no sheet fetch. They check output **length**, not just that a file exists.
 - All tests must pass before you report a slice as done. Add tests for new behavior where it can be tested offline.
