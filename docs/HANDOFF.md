@@ -15,6 +15,14 @@ There's a hack:
 - Once the batch begin again, it will count as a cached song and skip the download.
 - It should likely get include into the output eventually.
 
+**Naming convention for cached files:** `<videoID>_<kind>.<ext>`
+- `<videoID>` is the 11-character ID from the YouTube link, exactly as written (case matters). For `https://www.youtube.com/watch?v=oKBwWQI-IoI` or `https://youtu.be/oKBwWQI-IoI?si=...`, it's `oKBwWQI-IoI`.
+- `<kind>` is `audio` for audio-only runs, or `v` plus the `max_height` setting for video runs, e.g. `v720`. Use the **setting's** number, even if the file you downloaded is smaller (e.g. only 480p exists: still `v720`).
+- `<ext>` is the file's own extension; don't rename it (`.mp4`, `.m4a`, `.webm`, `.mp3`, …).
+- Examples: `oKBwWQI-IoI_audio.m4a`, `oKBwWQI-IoI_v720.mp4`.
+- The song title and artist are **not** in the name, so fixing a typo in the sheet doesn't cause a re-download. Titles show up in the log instead.
+- An audio-only file doesn't count for a video run, and the other way round, because the `<kind>` part differs.
+
 ## Rendering looks wrong but no error?
 
 FFmpeg does **not** fail when a song's end time is past the real length of the video. It quietly makes a broken, out-of-sync file. Song lengths must be checked before rendering (see TECH.md §10). The YouTube metadata length is rounded to whole seconds, so the early check alone is not enough.
