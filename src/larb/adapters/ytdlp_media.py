@@ -1,16 +1,23 @@
 """MediaSource implemented with yt-dlp (recipes: TECH §9).
 
-A new YoutubeDL instance is created for every call, so parallel downloads
-never share state.
+A new YoutubeDL instance is created for every call, so parallel look-ups and
+downloads never share state.
+
+Each video is looked up once: `lookup` remembers what it found, and `download`
+reuses it instead of asking YouTube again (TECH §14). If the remembered info is
+too old or the download with it fails, `download` falls back to a fresh look-up
+and logs that it did.
 """
 
+import threading
+import time
 from pathlib import Path
 
 import yt_dlp
 
 from larb.core.errors import DownloadError, MediaUnavailableError
-from larb.core.models import MediaInfo, MediaKind
-from larb.core.ports import MediaSource
+from larb.core.models import Level, LogEvent, MediaInfo, MediaKind
+from larb.core.ports import EventSink, MediaSource
 
 # Messages that mean "this video will never download"; anything else is worth a retry
 # (e.g. YouTube's intermittent "HTTP Error 403: Forbidden", ~1 in 10 video downloads
@@ -18,6 +25,17 @@ from larb.core.ports import MediaSource
 _PERMANENT_MARKERS = ("video unavailable", "this video is unavailable", "private video",
                       "has been removed", "copyright", "incomplete youtube id",
                       "sign in to confirm your age", "not available in your country")
+
+# YouTube's download links in the looked-up info expire after about 6 hours. Remembered
+# info older than this is not reused; the download looks the video up again instead.
+REMEMBER_FOR_S = 60 * 60
+
+# Parts of the looked-up info that downloads never use. Automatic captions are ~80 % of
+# it (~0.4 MB per video), so dropping them keeps 300 remembered videos at ~20 MB.
+_UNUSED_INFO_KEYS = ("automatic_captions", "subtitles", "heatmap")
+
+# A sheet URL with "&list=..." first resolves to a link to the video itself (TECH §14).
+_MAX_REDIRECTS = 3
 
 
 def _is_permanent(message: str) -> bool:
@@ -48,10 +66,14 @@ class YtDlpMediaSource(MediaSource):
     """Args:
         ffmpeg_dir: Folder holding the FFmpeg that yt-dlp should use for merging.
             Passed explicitly, or yt-dlp would pick whatever ffmpeg is on PATH.
+        events: Where to log look-up times (DEBUG) and fresh look-ups at download (INFO).
     """
 
-    def __init__(self, ffmpeg_dir: Path) -> None:
+    def __init__(self, ffmpeg_dir: Path, events: EventSink) -> None:
         self._ffmpeg_dir = ffmpeg_dir
+        self._events = events
+        self._lock = threading.Lock()   # look-ups and downloads run in several threads
+        self._remembered: dict[str, tuple[float, dict]] = {}   # url -> (when, raw info)
 
     def _base_options(self) -> dict:
         return {
@@ -63,19 +85,51 @@ class YtDlpMediaSource(MediaSource):
             "ffmpeg_location": str(self._ffmpeg_dir),
         }
 
+    def _log(self, level: Level, message: str) -> None:
+        self._events.emit(LogEvent(level, "media", message))
+
     def lookup(self, url: str) -> MediaInfo:
+        started = time.perf_counter()
         options = {**self._base_options(), "skip_download": True}
         try:
             with yt_dlp.YoutubeDL(options) as ydl:
-                info = ydl.extract_info(url, download=False)
+                # process=False: the raw info, before any format is picked. Only this can be
+                # reused by the download: info processed by another YoutubeDL got HTTP 403
+                # on every audio download tried (8 of 8, TECH §14).
+                info = ydl.extract_info(url, download=False, process=False)
+                for _ in range(_MAX_REDIRECTS):
+                    if not info or info.get("_type") != "url":
+                        break
+                    info = ydl.extract_info(info["url"], download=False, process=False,
+                                            ie_key=info.get("ie_key"))
         except yt_dlp.utils.DownloadError as e:
-            raise MediaUnavailableError(_clean(e)) from None
-        if not info or info.get("_type") == "playlist":
+            message = _clean(e)
+            raise MediaUnavailableError(message, retryable=not _is_permanent(message)) from None
+        if not info or info.get("_type") not in (None, "video"):
             raise MediaUnavailableError(f"{url} is not a single video")
         if info.get("duration") is None:
             raise MediaUnavailableError(f"{url} has no length (a live stream?)")
+        for key in _UNUSED_INFO_KEYS:
+            info.pop(key, None)
+        with self._lock:
+            self._remembered[url] = (time.monotonic(), info)
+        self._log(Level.DEBUG, f"looked up {info['id']} in {time.perf_counter() - started:.1f} s")
         return MediaInfo(media_id=info["id"], title=info.get("title") or "",
                          duration_s=float(info["duration"]))
+
+    def _take_remembered(self, url: str) -> dict | None:
+        """The info remembered by lookup(url), used once, or None if there is none or it's too old."""
+        with self._lock:
+            when, info = self._remembered.pop(url, (0.0, None))
+        if info is None:
+            self._log(Level.INFO, f"no looked-up info for {url}; looking it up again")
+            return None
+        age = time.monotonic() - when
+        if age > REMEMBER_FOR_S:
+            self._log(Level.INFO, f"looked-up info for {info['id']} is {age / 60:.0f} min old "
+                      f"(links may have expired); looking it up again")
+            return None
+        return info
 
     def download(self, url: str, kind: MediaKind, dest_dir: Path, stem: str) -> Path:
         options = {**self._base_options(), "outtmpl": str(dest_dir / f"{stem}.%(ext)s")}
@@ -86,9 +140,24 @@ class YtDlpMediaSource(MediaSource):
             # back to something when no H.264 exists. H.264 renders ~2.4x faster
             # than AV1 (TECH §9). Hard-coded, not a setting (SPEC §7).
             options["format_sort"] = ["vcodec:h264", f"res:{kind.max_height}", "acodec:m4a"]
+        info = self._take_remembered(url)
+        if info is not None:
+            self._log(Level.DEBUG, f"downloading {info['id']} with the looked-up info")
+            try:
+                return self._download(url, options, lambda ydl: ydl.process_ie_result(info, download=True))
+            except DownloadError as e:
+                if not e.retryable:
+                    raise
+                # A retry with fresh info is what fixes YouTube's intermittent 403 (TECH §9).
+                self._log(Level.INFO, f"download of {info['id']} with the looked-up info failed "
+                          f"({e}); looking it up again")
+        return self._download(url, options, lambda ydl: ydl.extract_info(url, download=True))
+
+    def _download(self, url: str, options: dict, fetch) -> Path:
+        """Run one download with a fresh YoutubeDL; `fetch(ydl)` returns yt-dlp's info."""
         try:
-            with yt_dlp.YoutubeDL(options) as ydl:  # fresh instance per call
-                info = ydl.extract_info(url, download=True)
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = fetch(ydl)
         except yt_dlp.utils.DownloadError as e:
             message = _clean(e)
             raise DownloadError(message, retryable=not _is_permanent(message)) from None

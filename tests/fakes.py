@@ -6,6 +6,8 @@ Not named test_*.py on purpose, so test discovery doesn't load it as a test modu
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -43,21 +45,41 @@ class FakeMedia(MediaSource):
     Args:
         fail_first: urls whose first download fails with a retryable error.
         always_fail: urls whose downloads always fail with a retryable error.
+        lookup_delays: url -> seconds its look-up takes (to make parallel look-ups
+            finish out of sheet order).
+        lookup_fail_first: urls whose first look-up fails with a retryable error.
     """
 
-    def __init__(self, table, fail_first=(), always_fail=()):
+    def __init__(self, table, fail_first=(), always_fail=(), lookup_delays=None, lookup_fail_first=()):
         self.table = table
         self.downloads = 0
         self.lookups = 0
+        self.max_concurrent_lookups = 0
+        self._running_lookups = 0
+        self._lock = threading.Lock()   # the pipeline looks up from several threads
         self._fail_first = set(fail_first)
         self._always_fail = set(always_fail)
+        self._lookup_delays = lookup_delays or {}
+        self._lookup_fail_first = set(lookup_fail_first)
 
     def lookup(self, url):
-        self.lookups += 1
-        if url not in self.table:
-            raise MediaUnavailableError(f"{url}: This video is unavailable")
-        path, length = self.table[url]
-        return MediaInfo(media_id=url.split("//")[-1], title=path.stem, duration_s=length)
+        with self._lock:
+            self.lookups += 1
+            self._running_lookups += 1
+            self.max_concurrent_lookups = max(self.max_concurrent_lookups, self._running_lookups)
+            fail_now = url in self._lookup_fail_first
+            self._lookup_fail_first.discard(url)
+        try:
+            time.sleep(self._lookup_delays.get(url, 0.0))
+            if fail_now:
+                raise MediaUnavailableError(f"{url}: connection reset", retryable=True)
+            if url not in self.table:
+                raise MediaUnavailableError(f"{url}: This video is unavailable")
+            path, length = self.table[url]
+            return MediaInfo(media_id=url.split("//")[-1], title=path.stem, duration_s=length)
+        finally:
+            with self._lock:
+                self._running_lookups -= 1
 
     def download(self, url, kind, dest_dir, stem):
         if url in self._always_fail:

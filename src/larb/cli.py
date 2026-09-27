@@ -100,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         events.emit(LogEvent(Level.INFO, "start", f"yt-dlp {ytdlp_media.version()}, settings: {CONFIG_FILE}"))
         pipeline = Pipeline(
             songs=CsvSongListSource(store.sheet_columns()),
-            media=ytdlp_media.YtDlpMediaSource(tools.ffmpeg.parent),
+            media=ytdlp_media.YtDlpMediaSource(tools.ffmpeg.parent, events),
             processor=FfmpegProcessor(tools, WORKSPACE / "tmp", events),
             events=events,
             workspace=WORKSPACE,
