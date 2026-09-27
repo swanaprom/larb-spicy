@@ -42,7 +42,7 @@ Record answers in §11 Findings log, then update the relevant section below.
 **Resolution order**
 - `setup_once`: static-ffmpeg download → else system FFmpeg → else prompt operator to install.
 - `run`: static → system → else stop with "run setup_once again". No downloading or prompting in `run`.
-- System FFmpeg must be **≥ 4.3** (`xfade` was added in 4.3). Older = treat as not found. [known]
+- FFmpeg (static or system) must be **≥ 7.1**: the renderer needs `-/filter_complex <file>` (7.1+); `xfade` alone would only need 4.3. Older = refused with a clear "too old" message (maintainer decision 2026-09-27, see §12). [found]
 - Log at every run start: which FFmpeg (static/system), its version, and the yt-dlp version.
 
 **Invocation helper (single module)**
@@ -254,6 +254,7 @@ Newest first. Date · what was tried · result · where it's now documented.
 
 | Date | Finding | Result | Documented in |
 | ---- | ------- | ------ | ------------- |
+| 2026-09-27 | FFmpeg minimum raised to 7.1; settings file moved to `config/config.toml` | old FFmpeg refused with clear message (offline test); live run reads new path | §3, §12 |
 | 2026-09-27 | Walking skeleton on live sheet (3 songs), audio + video | length checks pass; mirror rule confirmed from frames; cached re-run downloads nothing; real 403 fixed by retry | §12 |
 | 2026-09-27 | yt-dlp prints errors despite `quiet` | silent `logger` option | §12 |
 | 2026-09-27 | Parallel matrix 1–5 workers, 12 songs, 300 downloads | video best at 2–3 (1.54×), 4–5 slower; audio 2.46× at 5; 403 on 20/300 first tries, not tied to parallelism; 1 retry fixes 19/20 | §9 |
@@ -302,24 +303,27 @@ set PYTHONPATH=src
 - Cache: `<id>_audio.webm` and `<id>_v720.mp4` side by side; a second run with the same settings downloads nothing.
 
 **Implementation notes** [found unless marked]:
-- **`config.toml` lives in `workspace/config.toml`**, per CLAUDE.md's "never write outside workspace/ at runtime". On first run it's created by copying `config/example.toml` **as text**, so it keeps the explanatory comments. Keys missing from an older file are filled from the template on load. [decision → maintainer, SPEC doesn't say where the file lives]
-- **Filter-graph option depends on the FFmpeg version:** `-/filter_complex <file>` needs FFmpeg 7.1+, and SPEC accepts a system FFmpeg ≥ 4.3. So the processor uses the older `-filter_complex_script <file>` below 7.1; an unparseable version (dev builds) gets the new form. The old-FFmpeg path is **not tested** (only 8.0.1 is available here). [verify]
+- **The settings file is `config/config.toml`** (gitignored), **not** inside `workspace/`. `workspace/` gets deleted to free space, and settings must survive that (maintainer decision 2026-09-27). On first run it's created by copying `config/example.toml` **as text**, so it keeps the explanatory comments. Keys missing from an older file are filled from the template on load.
+- **Minimum FFmpeg is 7.1** (maintainer decision 2026-09-27, replacing SPEC's ≥ 4.3). The renderer passes the filter graph as a file with `-/filter_complex <file>`, which exists from 7.1. The older `-filter_complex_script` fallback was removed rather than kept untested. An older FFmpeg, static or system, is refused with `No usable FFmpeg: version 7.1 or newer is needed … system FFmpeg 4.4.2 (…) is too old` (checked offline in `tests/test_locate.py`). Version strings without a number (dev builds like `N-12345-g…`) are accepted; if one ever lacks the option, FFmpeg itself fails and the run stops with a `RenderError`. [found]
 - **yt-dlp prints its own `ERROR:` line on stderr even with `quiet=True`.** A do-nothing `logger` object in the options silences it; the core logs our own message instead.
 - **Audio-only downloads (`ba/b`) arrive as `.webm` (Opus).** That's fine: the cache keeps the file's own extension (HANDOFF rule).
-- **Each song's metadata is fetched twice** (`lookup` at manifest stage, then again inside `download`), because the approved port keeps them separate and a retry after a 403 needs fresh metadata anyway. That costs ~1.5–3 s per song. Could be cached inside the adapter later if it matters.
-- **Manifest look-ups run one at a time** (0.5–3 s per row). Fine for 3 rows; for ~300 rows it's roughly 5–10 min before downloads start. Parallelizing them is a later slice. [known]
+- **Each song's metadata is fetched twice** (`lookup` at manifest stage, then again inside `download`), about 1.5–3 s extra per song. The early YouTube check stays (maintainer decision). **Later slice:** the yt-dlp adapter remembers each `lookup` result and reuses it in `download`, with no port change; a retry after a 403 should still fetch fresh metadata (TECH §9).
+- **Manifest look-ups run one at a time** (0.5–3 s per row): roughly 5–10 min for ~300 rows before downloads start. **Later slice:** run look-ups in parallel, like downloads. [known]
 - The clipped K-pop masters measure a sample peak of exactly 0.0 dB, so peak normalization gives them −1.0 dB. The countdowns get +14 dB.
 - Output is rendered to `<name>.rendering.<ext>` and renamed only on success; a failed render leaves no file under the final name. The graph file is kept in `workspace/tmp/` when a render fails, for debugging.
 - Output length is verified through `MediaProcessor.measure(output, 0, 0.1)`. The tiny range keeps the peak scan cheap, since only the file length is needed. A dedicated "length" method would need a port change. [known]
 - `static-ffmpeg 3.0` declares `twine`, `requests`, `filelock` and `progress` as runtime dependencies. `twine` looks like an upstream packaging slip, but it's pinned anyway, as instructed.
 
-**Open flags for the maintainer** (behavior chosen in code, not in SPEC):
-1. **Absolute `output.directory` / `download.cache_directory`** outside `workspace/` are honored as the operator's choice, but CLAUDE.md says "never write outside workspace/". Should they be refused, or allowed?
-2. **Time-range format details:**
+**Maintainer decisions received 2026-09-27** (on behavior first chosen in code; to be written into SPEC / CLAUDE.md by the maintainer):
+1. **Output and cache folders chosen by the operator** may be outside `workspace/`; the defaults stay in `workspace/`. (CLAUDE.md's "never write outside workspace/" is about test runs, not about overruling the operator.)
+2. **Time-range format**, approved; a row error for ambiguous input is the right call:
    - Seconds must have **two digits** (`1.5` is a row error rather than guessed as 1:05 or 1:50).
    - `h:mm:ss` is accepted.
    - The `–` / `—` dashes phones insert are accepted.
    - Seconds of 60 or more are a row error.
-3. **Settings ranges:** `crossfade_duration_seconds` must be > 0 and ≤ 10 (0 = "no crossfade" isn't supported yet); `max_height` must be 144–4320 and even; `max_parallel_downloads` ≥ 1; `max_retries` ≥ 0.
-4. **Silent clip:** a peak ≤ −60 dB gets no gain, plus a warning, instead of a huge boost.
-5. **`filename_template`** accepts only `{date}` and `{time}`. Characters illegal in Windows file names are refused.
+3. **Settings ranges**, approved: `crossfade_duration_seconds` > 0 and ≤ 10 (no "no crossfade" option needed); `max_height` 144–4320 and even; `max_parallel_downloads` ≥ 1; `max_retries` ≥ 0.
+4. **Silent clip** (peak ≤ −60 dB): no gain plus a warning, approved.
+5. **`filename_template`**: only `{date}` and `{time}`; characters illegal in Windows file names are refused. Approved.
+6. **FFmpeg minimum 7.1** and the settings file at `config/config.toml`: see the notes above.
+
+Playback: all skeleton outputs play in Windows' built-in player (checked by the maintainer, 2026-09-27).
