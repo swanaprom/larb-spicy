@@ -120,6 +120,22 @@ Measured 2026-09-26 with yt-dlp 2026.08.19, one song (`oKBwWQI-IoI`, 162 s), cli
 - **Prefer H.264 sources:** YouTube's default 720p pick was AV1, and software AV1 decoding made the render **2.4× slower** (§10). [found]
 - Always pass `--ffmpeg-location <static bin dir>`: otherwise yt-dlp merges with whatever `ffmpeg` is on PATH (a system FFmpeg exists on this PC). [found]
 - Pass `--no-playlist`: sheet URLs contain `&list=RDMM…`. [found]
+**Parallel downloads: 1 vs 2 vs 5 at once** — `scratch/spike_parallel.py`, measured 2026-09-27. The same 5 songs as the moviepy comparison, a fresh empty folder per run, no JS runtime. Home connection, i5-6400.
+
+| Mode | Workers | Runs (wall time) | Typical | vs one at a time |
+| --- | --- | --- | --- | --- |
+| Video 720p (173 MB) | 1 | 72.2, 74.6, 66.8 s | ~71 s | — |
+| Video 720p | 2 | 53.4, 57.9, 58.0, 52.1 s (complete runs) | ~55 s | **~1.3× faster** |
+| Video 720p | 5 | 49.7, 51.7 s | ~51 s | **~1.4× faster** |
+| Audio only (18 MB) | 1 / 2 / 5 | 16.4 / 11.2 / 7.6 s | — | 1.5× / **2.2×** |
+
+- **Video is bandwidth-bound.** Throughput tops out around 3.3–3.5 MB/s with 2 or more workers (2.3–2.6 MB/s with one). Going from 2 to 5 workers adds little, because each song just gets a smaller share: with 5 workers each song takes 26–52 s instead of 10–20 s. [found]
+- **Audio is latency-bound** (small files; the per-song metadata round trip dominates), so more workers keep helping. [found]
+- ⚠ **Intermittent `HTTP Error 403: Forbidden`:** 2 of 70 video downloads, both in 2-worker runs, each a different song, each failing fast (~2 s). There were none in the 1-worker runs (15 downloads), the 5-worker runs (10) or the audio runs (15). With so few failures, this **can't be pinned on parallelism**. It matches YouTube's occasional 403 on format URLs, possibly related to running without a JS runtime ("some formats may be missing"). Per the maintainer's decision, no JS runtime was tried. [found]
+  - Mitigation to build: retry a failed song (fresh metadata extraction) 1–2 times before making it a row error. A retry wrapper was written but **never exercised**: the 3 runs with retry enabled had no 403. [verify]
+- Suggested default: **2 parallel downloads**. That gets most of the video gain, with less strain on YouTube than 5. Nothing else is decided here: the worker count is not in the SPEC §7 schema, so it's either hard-coded or a maintainer schema change. [found → maintainer]
+- For comparison, the moviepy prototype also used 5 workers.
+
 - Bad IDs fail loudly (exit 1, specific message): truncated ID → `Incomplete YouTube ID … looks truncated`; well-formed but missing → `This video is unavailable`. Good for row errors. [found]
 - Windows console locale here is cp874 → set `PYTHONIOENCODING=utf-8` (or use the Python API) when capturing yt-dlp output. [found]
 
@@ -156,7 +172,7 @@ Plus downloads: ~4 s/song for audio, ~11 s/song for 720p video on this connectio
 
 | | moviepy prototype | this pipeline |
 | --- | --- | --- |
-| End-to-end wall time | **605 s** | **104 s** (download 49 s + video 50 s + mp3 5 s) |
+| End-to-end wall time | **605 s** | **104 s** (download 49 s with 5 parallel workers + video 50 s + mp3 5 s) |
 | Video | 640×360 25 fps | 1280×720 30 fps |
 | Video / audio length | 202.68 s / **177.71 s** ✗ | 202.70 s / 202.70 s |
 
@@ -214,6 +230,7 @@ Newest first. Date · what was tried · result · where it's now documented.
 
 | Date | Finding | Result | Documented in |
 | ---- | ------- | ------ | ------------- |
+| 2026-09-27 | Parallel downloads 1 / 2 / 5 workers, 5 songs | video ~1.3× (2) / ~1.4× (5), bandwidth-bound; audio 2.2× at 5; 2 intermittent 403s of 70, cause unclear | §9 |
 | 2026-09-27 | TOML generate/read/write with tomli-w 1.2.0 | round trip exact; Windows `os.replace` fails on open file → retry; BOM rejected → `utf-8-sig` | §5 |
 | 2026-09-27 | Audio normalization, 4 modes + listening check | **peak chosen by ear** (hard-coded); two-pass loudnorm measured most even (0.8 LU) but pops the countdown out | §10 |
 | 2026-09-27 | `hvideo_6.mp4` silent | intended (intermediate video-only file of the hybrid join) | §10 |
