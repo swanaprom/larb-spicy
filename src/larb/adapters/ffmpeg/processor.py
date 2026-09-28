@@ -8,6 +8,7 @@ anything here; several lines look optional but aren't.
 
 import math
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -108,13 +109,16 @@ class FfmpegProcessor(MediaProcessor):
         try:
             # The whole list's audio in one pass (the audio-only graph), so there is no
             # audio seam at the chunk joins: joining AAC by copying drops a few ms there
-            # (TECH §10, method B).
-            self._run_pass(plan, audio_file, audio=True, video=False)
-            for n, (chunk, chunk_file) in enumerate(zip(chunks, chunk_files), 1):
-                self._run_pass(chunk, chunk_file, audio=False, video=True)
-                self._check_frames(chunk_file, chunk, f"video part {n}")
-                self._events.emit(LogEvent(Level.INFO, "render", f"video part {n}/{len(chunks)} done",
-                                           progress=(n, len(chunks))))
+            # (TECH §10, method B). It runs alongside the video chunks: it needs little
+            # CPU or memory, and one after the other cost ~15% more time (TECH §16).
+            with ThreadPoolExecutor(max_workers=1) as audio_worker:
+                audio_done = audio_worker.submit(self._run_pass, plan, audio_file, audio=True, video=False)
+                for n, (chunk, chunk_file) in enumerate(zip(chunks, chunk_files), 1):
+                    self._run_pass(chunk, chunk_file, audio=False, video=True)
+                    self._check_frames(chunk_file, chunk, f"video part {n}")
+                    self._events.emit(LogEvent(Level.INFO, "render", f"video part {n}/{len(chunks)} done",
+                                               progress=(n, len(chunks))))
+                audio_done.result()   # raises the audio pass's error, if it had one
             # Concat list: one "file '<path>'" line per chunk; a ' inside a path is written '\''.
             quote = "'\\''"
             list_file.write_text("".join(f"file '{str(f).replace(chr(39), quote)}'\n" for f in chunk_files),
