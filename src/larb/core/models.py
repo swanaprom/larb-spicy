@@ -143,22 +143,29 @@ class RenderPlan:
     """Everything the renderer needs. Segments play in order, crossfaded at every join.
 
     Attributes:
+        crossfades_s: The crossfade length of each join, in order: one fewer than
+            segments. Usually all the setting's value; the core shortens a join
+            whose clips are too short to hold it (pipeline.plan_crossfades).
         fade_out_s: The output fades to silence (and to black) over its last
             fade_out_s seconds, ending exactly at the end. 0 = no fade. The core
             decides it; the renderer only applies it. It doesn't change the length.
     """
 
     segments: tuple[Segment, ...]
-    crossfade_s: float
+    crossfades_s: tuple[float, ...]
     audio_only: bool
     height: int
     fade_out_s: float = 0.0
 
+    def __post_init__(self) -> None:
+        if len(self.crossfades_s) != max(len(self.segments) - 1, 0):
+            raise ValueError(f"{len(self.segments)} segments need {len(self.segments) - 1} "
+                             f"crossfades, got {len(self.crossfades_s)}")
+
     @property
     def expected_duration_s(self) -> float:
-        """Output length: all segments, minus one crossfade per join (TECH §10)."""
-        joins = max(len(self.segments) - 1, 0)
-        return sum(s.duration_s for s in self.segments) - self.crossfade_s * joins
+        """Output length: all segments, minus each join's crossfade (TECH §10)."""
+        return sum(s.duration_s for s in self.segments) - sum(self.crossfades_s)
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,8 @@ SILENT_PEAK_DB = -60.0      # below this a clip is treated as silent: no gain, w
 OVERRUN_TRIM_LIMIT_S = 1.0  # end past the real length by up to this -> trim to fit (SPEC §9 stage 6)
 LENGTH_TOLERANCE_S = 0.1    # allowed difference between planned and actual output length
 RETRY_PAUSE_S = 1.0         # pause before retry n is n * this
+FRAME_S = 1 / 30            # one frame of the output (30 fps is the hard-coded format, SPEC §7)
+MIN_CLIP_S = 3 * FRAME_S    # shorter clips can't hold a crossfade of even one frame on both sides
 RENDERING_SUFFIX = ".rendering"   # <name>.rendering.<ext>: output not checked yet
 FAILED_SUFFIX = "_FAILED"         # <name>_FAILED.<ext>: output rejected by the checks
 
@@ -49,6 +51,36 @@ def choose_countdown(given: str | None, settings: Settings) -> str:
             return candidate.strip()
     raise LarbError("No countdown. Pass --countdown with a file or a YouTube URL, or set "
                     "countdown.default_urls or countdown.default_files in the settings file")
+
+
+def crossfade_limits(durations: list[float], fade_out: bool) -> list[float]:
+    """The longest crossfade each clip can hold without its fades overlapping.
+
+    A clip keeps at least one frame to itself: its length minus one frame, halved
+    when it has a fade on both sides (a crossfade in and out, or in and the end
+    fade-out). That also leaves room to cut the video inside every countdown.
+
+    Args:
+        durations: The clips' lengths, in playing order.
+        fade_out: Whether the last clip also has the end fade-out.
+    """
+    n, limits = len(durations), []
+    for i, length in enumerate(durations):
+        sides = (i > 0) + (i < n - 1) + (i == n - 1 and fade_out)
+        limits.append((length - FRAME_S) / (2 if sides >= 2 else 1))
+    return limits
+
+
+def plan_crossfades(durations: list[float], setting_s: float) -> tuple[tuple[float, ...], float]:
+    """Each join's crossfade, and the end fade-out: the setting, or the longest both
+    clips next to it can hold (crossfade_limits), whichever is smaller.
+
+    Returns:
+        (one crossfade per join, the end fade-out length)
+    """
+    limits = crossfade_limits(durations, fade_out=True)
+    joins = tuple(min(setting_s, limits[i], limits[i + 1]) for i in range(len(durations) - 1))
+    return joins, min(setting_s, limits[-1])
 
 
 @dataclass
@@ -141,27 +173,21 @@ class Pipeline:
         paths = self._download_all(entries, kind, cache_dir, settings.download)
 
         # Stage 6: check real lengths and measure peaks.
-        segments = self._measure_songs(entries, paths, settings)
-        if not segments:
+        songs = self._measure_songs(entries, paths, settings)
+        if not songs:
             raise LarbError("No usable songs left, nothing to render. See the errors above.")
 
-        # Stage 7: render in one pass.
-        plan_segments = []
-        for song in segments:
-            plan_segments += [countdown_segment, song]
-        crossfade = settings.processing.crossfade_duration_seconds
-        # The end fade-out is as long as a crossfade: hard-coded, not a setting (SPEC §9 stage 7).
-        plan = RenderPlan(tuple(plan_segments), crossfade, kind.audio_only, kind.max_height,
-                          fade_out_s=crossfade)
+        # Stage 7: render.
+        plan = self._build_plan(countdown_segment, songs, settings.processing.crossfade_duration_seconds, kind)
         output = self._output_path(output_dir, settings.output.filename_template, kind, now)
-        self._log(Level.INFO, "render", f"Rendering {len(segments)} song(s), "
+        self._log(Level.INFO, "render", f"Rendering {len(songs)} song(s), "
                   f"about {plan.expected_duration_s:.1f} s long -> {output}")
         started = time.perf_counter()
         output = self._render_checked(plan, output)
         self._log(Level.INFO, "render", f"Done in {time.perf_counter() - started:.1f} s: {output}")
 
         # Stage 8 (unlock the GUI) belongs to the GUI; nothing to do here.
-        return RunResult(output, len(segments), self._errors, self._warnings, cache_dir)
+        return RunResult(output, len(songs), self._errors, self._warnings, cache_dir)
 
     # -- stage helpers ---------------------------------------------------------
 
@@ -265,7 +291,7 @@ class Pipeline:
             path = Path(countdown)
             if not path.is_file():
                 raise LarbError(f"Countdown file not found: {path}")
-        return self._check_countdown(path, settings.processing.crossfade_duration_seconds)
+        return self._check_countdown(path)
 
     def _fetch_countdown(self, url: str, kind: MediaKind, cache_dir: Path, dl: DownloadSettings) -> Path:
         """A countdown URL goes through the media source like a song: same look-up,
@@ -287,11 +313,13 @@ class Pipeline:
         except DownloadError as e:
             raise LarbError(f"Countdown download failed: {e}") from None
 
-    def _check_countdown(self, path: Path, crossfade_s: float) -> Segment:
+    def _check_countdown(self, path: Path) -> Segment:
         info = self._processor.measure(path, 0.0, None)
-        if info.duration_s <= crossfade_s:
-            raise LarbError(f"Countdown is {info.duration_s:.2f} s long, which is not longer "
-                            f"than the crossfade ({crossfade_s} s)")
+        # A short countdown only shortens the crossfades next to it (_build_plan);
+        # below this it can't hold even a one-frame crossfade.
+        if info.duration_s < MIN_CLIP_S:
+            raise LarbError(f"Countdown is {info.duration_s:.2f} s long; it must be at least "
+                            f"{MIN_CLIP_S:.2f} s")
         gain = self._gain_for(info.peak_db, "countdown", None)
         self._log(Level.INFO, "countdown", f"{path.name}: {info.duration_s:.2f} s, gain {gain:+.1f} dB")
         return Segment(path, 0.0, info.duration_s, mirror=False, gain_db=gain)  # countdowns never mirror
@@ -350,8 +378,8 @@ class Pipeline:
                 time.sleep(RETRY_PAUSE_S * (attempt + 1))
         raise AssertionError("unreachable: the loop always returns or raises")
 
-    def _measure_songs(self, entries, paths: dict[str, Path], settings: Settings) -> list[Segment]:
-        crossfade = settings.processing.crossfade_duration_seconds
+    def _measure_songs(self, entries, paths: dict[str, Path],
+                       settings: Settings) -> list[tuple[ManifestEntry, Segment]]:
         segments = []
         for entry in entries:
             path = paths.get(entry.media.media_id)
@@ -379,16 +407,45 @@ class Pipeline:
                 end = real
             # Padding, clamped to the file (SPEC §4).
             start, end = max(0.0, start - PADDING_S), min(real, end + PADDING_S)
-            if end - start <= crossfade:
+            # A short clip only shortens its crossfades (_build_plan); below this it
+            # can't hold even a one-frame crossfade on both sides.
+            if end - start < MIN_CLIP_S:
                 self._log(Level.ERROR, "measure", f"skipped: clip is {end - start:.2f} s, "
-                          f"not longer than the crossfade ({crossfade} s)", entry.row_number)
+                          f"shorter than {MIN_CLIP_S:.2f} s", entry.row_number)
                 continue
             mirror = settings.processing.mirror and not entry.already_mirrored  # SPEC §8 Mirror rule
             gain = self._gain_for(info.peak_db, "measure", entry.row_number)
-            segments.append(Segment(path, start, end, mirror, gain))
+            segments.append((entry, Segment(path, start, end, mirror, gain)))
             self._log(Level.DEBUG, "measure", f"{entry.display_name}: {start:.1f}-{end:.1f} s, "
                       f"peak {info.peak_db:.1f} dB -> gain {gain:+.1f} dB, mirror {mirror}", entry.row_number)
         return segments
+
+    def _build_plan(self, countdown: Segment, songs: list[tuple[ManifestEntry, Segment]],
+                    setting_s: float, kind: MediaKind) -> RenderPlan:
+        """Countdown before every song, crossfaded at every join, fading out at the end.
+
+        A join's crossfade is shortened when a clip next to it is too short to hold
+        the setting (plan_crossfades). Each song that causes that gets a row warning;
+        the countdown, which is the same clip every time, gets one warning per run.
+        """
+        segments = []
+        for _, song in songs:
+            segments += [countdown, song]
+        durations = [s.duration_s for s in segments]
+        crossfades, fade_out = plan_crossfades(durations, setting_s)
+        # The end fade-out follows the same rule as a crossfade: hard-coded, not a setting (SPEC §9 stage 7).
+        limits = crossfade_limits(durations, fade_out=True)
+
+        countdown_limit = min(limits[0::2])
+        if countdown_limit < setting_s:
+            self._log(Level.WARNING, "render", f"Countdown is only {countdown.duration_s:.2f} s: crossfades "
+                      f"next to it shortened to {countdown_limit:.2f} s (setting {setting_s:g} s)")
+        for (entry, song), limit in zip(songs, limits[1::2]):
+            if limit < setting_s:
+                self._log(Level.WARNING, "render", f"{entry.display_name}: clip is only "
+                          f"{song.duration_s:.2f} s: crossfades next to it shortened to {limit:.2f} s "
+                          f"(setting {setting_s:g} s)", entry.row_number)
+        return RenderPlan(tuple(segments), crossfades, kind.audio_only, kind.max_height, fade_out_s=fade_out)
 
     def _gain_for(self, peak_db: float, stage: str, row: int | None) -> float:
         """Peak normalization: bring the clip's loudest point to TARGET_PEAK_DB."""

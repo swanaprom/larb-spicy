@@ -91,16 +91,17 @@ class FfmpegProcessor(MediaProcessor):
                 lines.append(f"[{i}:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
                              f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS},format=yuv420p"
                              f"{flip},setpts=PTS-STARTPTS[v{i}]")
-        n, d = len(plan.segments), plan.crossfade_s
         # acrossfade needs no lengths; xfade needs the offset of each join,
         # which is why every segment's length must be known up front.
+        # Each join has its own crossfade length (the core shortens it for short clips).
         prev_a, prev_v, length = "a0", "v0", plan.segments[0].duration_s
-        for i in range(1, n):
-            lines.append(f"[{prev_a}][a{i}]acrossfade=d={d}:c1=tri:c2=tri[ax{i}]")
+        for i in range(1, len(plan.segments)):
+            d = plan.crossfades_s[i - 1]
+            lines.append(f"[{prev_a}][a{i}]acrossfade=d={d:.6f}:c1=tri:c2=tri[ax{i}]")
             prev_a = f"ax{i}"
             if video:
-                lines.append(f"[{prev_v}][v{i}]xfade=transition=fade:duration={d}"
-                             f":offset={length - d:.3f}[vx{i}]")
+                lines.append(f"[{prev_v}][v{i}]xfade=transition=fade:duration={d:.6f}"
+                             f":offset={length - d:.6f}[vx{i}]")
                 prev_v = f"vx{i}"
             length += plan.segments[i].duration_s - d
 
@@ -112,9 +113,9 @@ class FfmpegProcessor(MediaProcessor):
             start = max(length - f, 0.0)
             # curve=qua: volume falls with the square of the time left, so the tail is
             # inaudible sooner than with the default straight line (maintainer choice).
-            lines.append(f"[{prev_a}]afade=t=out:st={start:.3f}:d={f}:curve=qua[aout]")
+            lines.append(f"[{prev_a}]afade=t=out:st={start:.6f}:d={f:.6f}:curve=qua[aout]")
             if video:
-                lines.append(f"[{prev_v}]fade=t=out:st={start:.3f}:d={f}:color=black[vout]")
+                lines.append(f"[{prev_v}]fade=t=out:st={start:.6f}:d={f:.6f}:color=black[vout]")
         else:
             lines.append(f"[{prev_a}]anull[aout]")
             if video:
