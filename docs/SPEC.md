@@ -270,10 +270,13 @@ larb-spicy/
 ├── docs/SPEC.md          # this document
 ├── docs/HANDOFF.md       # decisions + gotchas for next generation
 ├── docs/TECH.md          # implementation notes: the how (SPEC wins on conflict)
-├── requirements.txt      # exact == pins, everything except yt-dlp
-├── <python range file>   # single source of truth for supported Python
-├── setup_once.bat / .sh
-├── run.bat / .sh
+├── requirements.txt      # exact == pins, everything except yt-dlp (platform markers for Linux-only / 3.11-only packages)
+├── python-range.txt      # supported Python range, e.g. 3.11-3.13; the only place it's written
+├── .gitattributes        # keeps .sh files in LF and .bat files in CRLF line endings
+├── setup_once.bat / .sh  # thin: find or install a Python, then hand over
+├── run.bat / .sh         # thin: same, then start the program
+├── tools/find_python.*   # the "get a suitable Python" step, per OS
+├── tools/env_setup.py    # everything after that, shared by all OSes
 ├── config/example.toml   # committed template
 ├── config/config.toml    # live settings, gitignored
 ├── src/larb/core/        # rules + orchestration, ports, models, errors (stdlib only)
@@ -305,20 +308,31 @@ Dependency strategy: **stable where possible, fresh where necessary.**
 - Python is pinned to a tested range (§6). Pinned Python + pinned libraries age together consistently.
 - FFmpeg comes from `static-ffmpeg` inside the venv (pinned). The fallback system FFmpeg is outside Python: checked, not managed by the venv. No JS runtime is required (§6).
 
-Key fact: a venv is a folder of libraries pointing to one specific installed Python. It isolates libraries and specify their versions, while the **scripts** guarantee the Python version.
+Key fact: a venv is a folder of libraries pointing to one specific installed Python. It isolates libraries and pins their versions, while the **scripts** guarantee the Python version. The venv is disposable: rebuilding it is always safe.
+
+**How the work is split:** the shell scripts (`.bat` for Windows, `.sh` for Linux/Mac) have one job: get a suitable Python. Everything after that lives in one shared Python script (`tools/env_setup.py`), so each rule is written once, not once per shell language.
+
+Supported range: `python-range.txt`. Every version in it has passed the full test suite (2026-09: 3.11, 3.12, 3.13 on Windows; 3.13 on Linux). The version **offered for install** is the newest in the range.
 
 `setup_once`:
 
-1. Find a Python in the supported range (Windows: `py -0` lists installed, `py -3.12` picks one; Linux/Mac: try `python3.12`, `python3.13`, ...). None found → Offer `winget` (or some package manager method for linux) or point to python.org (Windows: tick "Add to PATH") and stop.
+1. **Get a suitable Python** (shell scripts). Use one in the range if installed. If there's none (no Python at all, or only versions outside the range, like a too-new one), say which version to get and that it installs **alongside** the existing Python, with nothing to uninstall. Then ask before installing: `winget` on Windows, `brew` on Mac, and install after a yes. On Linux, print the exact command instead (no `sudo` from scripts); on some distros that includes adding the deadsnakes package archive, since they ship only a newer Python. If winget is missing or the user declines, point to python.org. After an install, tell the user to open a new terminal and run setup again.
 2. Build the venv with that Python.
 3. Install pinned libraries + latest yt-dlp.
-4. Get FFmpeg: trigger the `static-ffmpeg` download now (about 45 s and 200 MB the first time), so the first real run doesn't stall. If that fails → use system FFmpeg if it's 7.1 or newer → else ask whether to install it (`winget` on Windows, `brew` on Mac; on Linux, print the command). After installing, tell the user to reopen the terminal and run setup again.
+4. Get FFmpeg: trigger the `static-ffmpeg` download now (about 45 s and 200 MB the first time), so the first real run doesn't stall. If that fails → use system FFmpeg if it's 7.1 or newer → else ask whether to install it (`winget` on Windows, `brew` on Mac; on Linux, print the command, with a warning that the distro's FFmpeg may be older than 7.1). After installing, tell the user to reopen the terminal and run setup again.
+5. On Linux, check that tkinter is available (the GUI needs it) and print the install command if not.
+6. Always pause at the end, so a double-clicked window stays readable.
+
+Running `setup_once` again is safe and fast (seconds): nothing is rebuilt unless something is missing or out of range. Measured 2026-09: first setup about 3 minutes on Windows and on Linux.
 
 `run`:
 
-1. Venv missing, or its Python outside the range → rebuild it automatically.
+1. Venv missing, or its Python outside the range → rebuild it automatically, **announcing it first** (it includes the one-time FFmpeg download, so it can take minutes). If `requirements.txt` changed since the last install (e.g. after a `git pull`), reinstall the libraries.
 2. `pip install -U yt-dlp` (not `yt-dlp -U`, which is for the standalone binary). No internet → warn and continue with the installed version.
-3. Log the yt-dlp version (first suspect when downloads break), then start the program.
+3. Log the yt-dlp version (first suspect when downloads break), then start the program with UTF-8 output, so Thai titles print correctly.
+4. Started with no arguments (e.g. double-clicked) → ask for the sheet URL, and keep the window open at the end so the result can be read.
+
+The program itself never downloads FFmpeg: a run uses static-ffmpeg only if it's already downloaded, otherwise the system FFmpeg.
 
 ## 17. Maintenance & Hand-off
 
@@ -326,8 +340,8 @@ Key fact: a venv is a folder of libraries pointing to one specific installed Pyt
 
 - "Downloads failing? Update yt-dlp first. If still failing, it may need a JS runtime (Deno is yt-dlp's default; Node works if passed explicitly)."
 - Python update recipe (expect every few years, when yt-dlp drops an end-of-life Python):
-    1. Install the new Python from python.org _alongside_ the old one; don't uninstall yet.
-    2. Change the range in the Python range file.
-    3. Run `setup_once` (rebuilds the venv).
+    1. Install the new Python _alongside_ the old one (`setup_once` can offer it, or use python.org); don't uninstall yet.
+    2. Change the range in `python-range.txt`.
+    3. Delete the `.venv` folder, then run `setup_once`. (It only rebuilds by itself if the old Python fell outside the range.)
     4. Run the smoke test. Pass → commit and tag a new CalVer release; only then uninstall the old Python. Fail → usually a pinned library needs bumping; hand the error to an AI.
 - When to consider updating ports? : idk yet, When it traced the error to this port and the library is old as heck, or maybe just adjust dependency version, then check compatibility? lightwork.
