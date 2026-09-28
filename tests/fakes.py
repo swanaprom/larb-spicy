@@ -29,6 +29,7 @@ SEWER = FIX / "sewer. [Instrumental].mp3"
 THAI_MP4 = next(FIX.glob("*.mp4"))            # 7.27 s, awkward name on purpose
 CD_MP3 = FIX / "countdown" / "!countdown.mp3"
 CD_MP4 = FIX / "countdown" / "!countdown.mp4"
+CD_OPUS = FIX / "countdown" / "tone_3s.webm"    # Opus: container says 3.008 s, decodes to 3.000 s
 
 
 class FakeSongs(SongListSource):

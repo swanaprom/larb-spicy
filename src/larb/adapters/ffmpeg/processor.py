@@ -80,8 +80,13 @@ class FfmpegProcessor(MediaProcessor):
         for i, seg in enumerate(plan.segments):
             # Gain first, then make every segment's format identical: the inputs
             # differ (44.1 vs 48 kHz, different sizes and frame rates).
+            # apad + atrim: exactly the planned length, padded with silence or cut. An
+            # Opus file's container reports a few ms more than decodes (TECH §16), which
+            # added up over a long list; any other source a few ms off is covered too.
+            dur = f"{seg.duration_s:.6f}"
             lines.append(f"[{i}:a]volume={seg.gain_db:.2f}dB,aresample={AUDIO_RATE},"
-                         f"aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS[a{i}]")
+                         f"aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS,"
+                         f"apad=whole_dur={dur},atrim=duration={dur}[a{i}]")
             if video:
                 flip = ",hflip" if seg.mirror else ""
                 lines.append(f"[{i}:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
