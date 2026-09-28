@@ -32,3 +32,8 @@ rfc3986==2.0.0
 rich==15.0.0
 twine==7.0.0
 urllib3==2.8.0
+#
+# Only on Python 3.11 (newer Pythons have these built in); pulled in by keyring and jaraco.context:
+backports.tarfile==1.2.0 ; python_version < "3.12"
+importlib_metadata==9.0.1 ; python_version < "3.12"
+zipp==4.1.0 ; python_version < "3.12"
