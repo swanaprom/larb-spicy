@@ -31,6 +31,18 @@ While checking the sheet, the yt-dlp adapter looks each video up and remembers t
 
 If a reused look-up fails anyway, the adapter looks the video up again by itself and logs `... looking it up again`. That line is normal now and then (YouTube's intermittent 403), not a bug.
 
+## "Sign in to confirm you're not a bot" or "HTTP Error 429: Too Many Requests"?
+
+YouTube is limiting this internet connection because it was asked too much in a short time (seen 2026-09-28 after ~20 runs and several hundred look-ups in one morning). It's not a program bug, and retrying at once makes it worse. Wait (at least an hour) and run again. The program has no cookie option; see [TECH.md](TECH.md) §16.
+
+## An output named `..._FAILED.mp3` / `.mp4`?
+
+The render finished (or crashed partway), but the result didn't match the plan, so it was **not** given the normal name. The log says why (e.g. `Output is ... s long but should be ... s`). The file is kept only so someone can look at it; don't use it for the event. A file named `....rendering.mp3` / `.mp4` is a run that was interrupted; the next run deletes it by itself.
+
+## Warning: "crossfades next to it shortened"?
+
+A clip too short for the crossfade setting gets shorter crossfades, so the fades never overlap. For a song it means its time range is very short (check the sheet); for the countdown it means the countdown is short for the crossfade setting (the usual countdown, 5.3 s, fits crossfades up to 2.6 s). The run still works.
+
 ## Rendering looks wrong but no error?
 
 FFmpeg does **not** fail when a song's end time is past the real length of the video. It quietly makes a broken, out-of-sync file. Song lengths must be checked before rendering (see TECH.md §10). The YouTube metadata length is rounded to whole seconds, so the early check alone is not enough.
