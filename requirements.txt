@@ -37,3 +37,11 @@ urllib3==2.8.0
 backports.tarfile==1.2.0 ; python_version < "3.12"
 importlib_metadata==9.0.1 ; python_version < "3.12"
 zipp==4.1.0 ; python_version < "3.12"
+#
+# Only on Linux; pulled in by keyring (SecretStorage, jeepney) and SecretStorage (the rest).
+# Versions from a real Linux setup (WSL Ubuntu 26.04, Python 3.13, 2026-09-28):
+cffi==2.1.1 ; sys_platform == "linux"
+cryptography==50.0.1 ; sys_platform == "linux"
+jeepney==0.9.0 ; sys_platform == "linux"
+pycparser==3.0 ; sys_platform == "linux"
+SecretStorage==3.5.0 ; sys_platform == "linux"
