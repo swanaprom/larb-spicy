@@ -94,7 +94,11 @@ class MediaProcessor(ABC):
 
     @abstractmethod
     def render(self, plan: RenderPlan, output_path: Path) -> Path:
-        """Render the plan into one file at output_path.
+        """Render the plan into one file, exactly at output_path (no renaming).
+
+        The caller checks the result and gives it its final name. If rendering
+        fails, a partly written file may be left at output_path; the caller
+        decides what happens to it.
 
         Raises:
             MediaToolMissingError: The media tool isn't available.

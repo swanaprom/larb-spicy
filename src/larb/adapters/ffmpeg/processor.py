@@ -4,7 +4,6 @@ The render recipe is the one measured in the spike (TECH §10). Read that sectio
 before changing anything here; several lines look optional but aren't.
 """
 
-import os
 import re
 from pathlib import Path
 
@@ -140,13 +139,9 @@ class FfmpegProcessor(MediaProcessor):
         else:
             args += ["-map", "[vout]", *VIDEO_ARGS, "-map", "[aout]", *VIDEO_AUDIO_ARGS]
 
-        # Render to a temporary name, then rename: a crash never leaves a
-        # half-written file under the final name.
-        partial = output_path.with_name(f"{output_path.stem}.rendering{output_path.suffix}")
-        try:
-            run_tool(self._tools.ffmpeg, [*args, str(partial)], self._log_command)
-            os.replace(partial, output_path)
-        finally:
-            partial.unlink(missing_ok=True)
+        # Straight to output_path: the core picks a temporary name and renames the
+        # file only after checking it. A failed run leaves its partial file for the
+        # core to name, and the graph file here for debugging.
+        run_tool(self._tools.ffmpeg, [*args, str(output_path)], self._log_command)
         graph_file.unlink(missing_ok=True)
         return output_path

@@ -22,6 +22,8 @@ SILENT_PEAK_DB = -60.0      # below this a clip is treated as silent: no gain, w
 OVERRUN_TRIM_LIMIT_S = 1.0  # end past the real length by up to this -> trim to fit (SPEC §9 stage 6)
 LENGTH_TOLERANCE_S = 0.1    # allowed difference between planned and actual output length
 RETRY_PAUSE_S = 1.0         # pause before retry n is n * this
+RENDERING_SUFFIX = ".rendering"   # <name>.rendering.<ext>: output not checked yet
+FAILED_SUFFIX = "_FAILED"         # <name>_FAILED.<ext>: output rejected by the checks
 
 # Characters Windows doesn't allow in file names.
 _ILLEGAL_FILENAME_CHARS = set('<>:"/\\|?*')
@@ -115,6 +117,7 @@ class Pipeline:
         kind = MediaKind(settings.processing.audio_only, settings.download.max_height)
         cache_dir = self._resolve_dir(settings.download.cache_directory, "cache")
         output_dir = self._resolve_dir(settings.output.directory, "output")
+        self._remove_leftover_renders(output_dir)
         self._log(Level.INFO, "settings", f"Mode: {'audio only' if kind.audio_only else f'video up to {kind.max_height}p'}, "
                   f"mirror: {'on' if settings.processing.mirror else 'off'}. Media tool: {self._processor.describe()}")
 
@@ -154,8 +157,7 @@ class Pipeline:
         self._log(Level.INFO, "render", f"Rendering {len(segments)} song(s), "
                   f"about {plan.expected_duration_s:.1f} s long -> {output}")
         started = time.perf_counter()
-        self._processor.render(plan, output)
-        self._verify_output(output, plan)
+        output = self._render_checked(plan, output)
         self._log(Level.INFO, "render", f"Done in {time.perf_counter() - started:.1f} s: {output}")
 
         # Stage 8 (unlock the GUI) belongs to the GUI; nothing to do here.
@@ -408,12 +410,61 @@ class Pipeline:
         if bad or not name.strip():
             raise LarbError(f"output.filename_template gives an unusable file name {name!r}")
         ext = ".mp3" if kind.audio_only else ".mp4"   # hard-coded output formats (SPEC §7)
-        path = output_dir / f"{name}{ext}"
-        n = 2
-        while path.exists():  # never overwrite an earlier output
-            path = output_dir / f"{name}_{n}{ext}"
-            n += 1
-        return path
+        return _free_name(output_dir / f"{name}{ext}")
+
+    def _remove_leftover_renders(self, output_dir: Path) -> None:
+        """Delete temporary outputs left by a run that crashed or was killed.
+
+        Only <name>.rendering.mp3 / .mp4 files, the only temporary files a run puts in
+        the output folder: the operator may point it at a folder with their own files.
+        A file another run is still writing can't be deleted on Windows; it's skipped.
+        """
+        for pattern in (f"*{RENDERING_SUFFIX}.mp3", f"*{RENDERING_SUFFIX}.mp4"):
+            for path in output_dir.glob(pattern):
+                if not path.is_file():
+                    continue
+                try:
+                    path.unlink()
+                    self._log(Level.INFO, "output", f"Removed a leftover unfinished output: {path.name}")
+                except OSError as e:
+                    self._log(Level.WARNING, "output", f"Can't remove leftover {path.name} "
+                              f"(another run may still be writing it): {e}")
+
+    def _render_checked(self, plan: RenderPlan, output: Path) -> Path:
+        """Render to a temporary name, check the result, then name it.
+
+        Rule: nothing unverified ever gets the final name. A render that passes the
+        length check is renamed to `output`; one that fails the check, or that fails
+        after writing something, is renamed to <name>_FAILED.<ext> and the run stops.
+
+        Returns:
+            Where the output ended up (`output`, or the next free name if that has
+            appeared in the meantime).
+
+        Raises:
+            RenderError: Rendering failed or the result doesn't match the plan.
+        """
+        rendering = output.with_name(f"{output.stem}{RENDERING_SUFFIX}{output.suffix}")
+        try:
+            self._processor.render(plan, rendering)
+            self._verify_output(rendering, plan)
+        except RenderError as e:
+            raise RenderError(f"{e}{self._keep_failed(rendering, output)}") from None
+        final = _free_name(output)   # never overwrite an earlier output
+        rendering.rename(final)
+        return final
+
+    def _keep_failed(self, rendering: Path, output: Path) -> str:
+        """Rename a failed render to <name>_FAILED.<ext>, so it can be inspected but never
+        mistaken for a good result. Returns a note for the error message."""
+        if not rendering.is_file():
+            return ""
+        if rendering.stat().st_size == 0:    # nothing was written: nothing worth keeping
+            rendering.unlink(missing_ok=True)
+            return ""
+        failed = _free_name(output.with_name(f"{output.stem}{FAILED_SUFFIX}{output.suffix}"))
+        rendering.rename(failed)
+        return f"\nThe rejected file was kept as {failed}"
 
     def _verify_output(self, output: Path, plan: RenderPlan) -> None:
         """Goal 1: FFmpeg can succeed and still write a wrong file, so check the length."""
@@ -423,5 +474,14 @@ class Pipeline:
         actual = self._processor.measure(output, 0.0, 0.1).duration_s
         expected = plan.expected_duration_s
         if abs(actual - expected) > LENGTH_TOLERANCE_S:
-            raise RenderError(f"Output is {actual:.2f} s long but should be {expected:.2f} s: {output}")
+            raise RenderError(f"Output is {actual:.2f} s long but should be {expected:.2f} s")
         self._log(Level.INFO, "render", f"Length check ok: {actual:.2f} s (planned {expected:.2f} s)")
+
+
+def _free_name(path: Path) -> Path:
+    """path if nothing is there yet, else the first free <stem>_2, _3, ... in the same folder."""
+    candidate, n = path, 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem}_{n}{path.suffix}")
+        n += 1
+    return candidate
