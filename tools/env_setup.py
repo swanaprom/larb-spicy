@@ -91,8 +91,9 @@ def venv_env() -> dict[str, str]:
 
 
 def venv_run(code: str, capture: bool = False) -> subprocess.CompletedProcess:
-    """Run a few lines of Python with the venv's Python (it has the libraries, we don't)."""
-    return subprocess.run([str(venv_python()), "-c", code], env=venv_env(), text=True,
+    """Run a few lines of Python with the venv's Python (it has the libraries, we don't).
+    Unbuffered (-u), so its lines appear in order with ours."""
+    return subprocess.run([str(venv_python()), "-u", "-c", code], env=venv_env(), text=True,
                           capture_output=capture, encoding="utf-8" if capture else None,
                           errors="replace" if capture else None)
 
@@ -250,6 +251,16 @@ def _offer_ffmpeg_install() -> None:
                      "https://ffmpeg.org/download.html (Linux static builds) instead.")
 
 
+# One line instead of a traceback when the download fails (e.g. no internet).
+FETCH_STATIC = """
+from larb.adapters.ffmpeg.locate import fetch_static
+try:
+    fetch_static()
+except Exception as e:
+    print(f"static-ffmpeg: {type(e).__name__}: {e}")
+    raise SystemExit(1)
+"""
+
 FIND_FFMPEG = """
 from larb.adapters.ffmpeg.locate import find_ffmpeg
 from larb.core.errors import LarbError
@@ -267,10 +278,10 @@ def ensure_ffmpeg(offer_install: bool) -> None:
     what the program will actually use: static-ffmpeg, else a system FFmpeg 7.1+."""
     # Does nothing (and prints nothing) when the binaries are already there.
     say("Checking FFmpeg (the first time this downloads about 200 MB, ~45 s)...")
-    fetched = venv_run("from larb.adapters.ffmpeg.locate import fetch_static; fetch_static()")
+    fetched = venv_run(FETCH_STATIC)
     if fetched.returncode != 0:
-        say("WARNING: the static-ffmpeg download failed (see above). Looking for a system "
-            "FFmpeg 7.1 or newer instead.")
+        say("WARNING: the static-ffmpeg download failed. Looking for a system FFmpeg 7.1 or "
+            "newer instead.")
     found = venv_run(FIND_FFMPEG, capture=True)
     say(found.stdout.strip())
     if found.returncode == 0:
