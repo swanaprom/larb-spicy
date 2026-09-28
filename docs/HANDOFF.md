@@ -87,4 +87,5 @@ The countdown can be a YouTube link (`--countdown <URL>`, or `countdown.default_
 
 - Expose some configs in TOML as 'Advanced Settings' into GUI, currently hide by design to keep it direct and minimal.
 - Final output length predictor before processing.
-- Remembering video lengths for each row between runs could help reduce Youtube counting requests per connection, for repetitive mass runs.
+- Remember each video's length between runs. Today every run looks up every row on YouTube again, even when the video is already downloaded. Saving the lengths (e.g. next to the cache) would let reruns of a long list skip most look-ups, which is what gets a connection limited ("Sign in to confirm you're not a bot", HTTP 429).
+- Support YouTube cookies (yt-dlp's `--cookies-from-browser`), the usual cure for the bot check. Trade-off: the program then uses a logged-in account's session. Downloads count against that account, and a heavy run could get the account itself limited or flagged, so it should be a throwaway account, never someone's personal one. Not supported for now (maintainer decision 2026-09-28); until then, wait and retry.
