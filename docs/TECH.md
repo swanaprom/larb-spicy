@@ -22,7 +22,7 @@ Record answers in §11 Findings log, then update the relevant section below.
 
 - A venv is a folder of libraries pointing to **one specific installed Python**. It isolates libraries, not Python. Updating Python does not update an existing venv; the venv keeps pointing at the old interpreter (or breaks if it was uninstalled). **The venv is disposable — rebuild, never repair.** [known]
 - Finding Python: Windows `py -0` lists installed versions, `py -3.12` selects one. Linux/Mac: try `python3.13`, `python3.12`, `python3.11`. [known]
-- Supported range is read from one file by both scripts. File name: TBD.
+- Supported range is read from one file by both scripts: `python-range.txt` at the repo root (e.g. `3.11-3.13`). See §17.
 - yt-dlp update: `pip install -U yt-dlp` inside the venv. **Not** `yt-dlp -U` (that's for the standalone binary). On no internet: warn and continue. [known]
 - yt-dlp drops Python versions once they reach end-of-life; when it refuses to install, bump the Python range (see HANDOFF.md recipe). [known]
 - Installing system tools: after `winget` (Windows) or `brew` (Mac), a **new terminal** is usually needed before the tool is on PATH. On Linux, print the `sudo apt ...` command rather than running it. [known]
@@ -41,7 +41,7 @@ Record answers in §11 Findings log, then update the relevant section below.
 
 **Resolution order**
 - `setup_once`: static-ffmpeg download → else system FFmpeg → else prompt operator to install.
-- `run`: static → system → else stop with "run setup_once again". No downloading or prompting in `run`.
+- `run`: static → system → else stop with "run setup_once again". No downloading or prompting in `run`. (Until slice 4 the program's lookup did download static-ffmpeg when missing; fixed, §17.)
 - FFmpeg (static or system) must be **≥ 7.1**: the renderer needs `-/filter_complex <file>` (7.1+); `xfade` alone would only need 4.3. Older = refused with a clear "too old" message (maintainer decision 2026-09-27, see §12). [found]
 - Log at every run start: which FFmpeg (static/system), its version, and the yt-dlp version.
 
@@ -505,3 +505,49 @@ i5-6400, 15.9 GB, FFmpeg 8.0.1 (static), 720p. Measurement scripts were throwawa
 **YouTube bot check.** After ~20 live runs and several hundred look-ups in one morning, look-ups failed with `Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies …`. The countdown look-up failed after 2 retries and the run stopped, as designed. Then plain `HTTP Error 429: Too Many Requests`, still after ~15 min. Not caused by this slice's code; not retried further, to let the limit expire. yt-dlp's suggested fix is cookies (`--cookies-from-browser`), which the program doesn't support; if this happens at a real event, that's a maintainer decision (HANDOFF). [found 2026-09-28]
 
 **Tests.** 67 tests (+21). `test_audio_length.py` (20 Opus countdowns keep the planned length, ±0.02 s; the fixture still has its Opus gap), `test_output_naming.py` (fake processor: success, length mismatch, failure after / before writing, `_FAILED_2`, leftover cleanup, locked leftover on Windows), `test_crossfades.py` (the rule, no overlapping fades, short countdown, short song, 3-frame floor), `test_chunks.py` (split maths, cut inside the solo part, one-frame solo part, 3 chunks rendered with the chunk size patched to 2: length, A/V within a frame, progress, temporary files gone).
+
+## 17. Slice 4 — setup and run scripts (2026-09-28, branch `slice-4-setup-run`)
+
+Windows 11, i5-6400, home connection. Pythons installed side by side: 3.11.9, 3.12.10, 3.13.15 (per-user, via winget), 3.14.0 (`C:\Python314`). System FFmpeg: `C:\Program Files\FFmpeg\bin\ffmpeg.exe`, version `N-121522-gd01608e022-20251026` (a dev build with no version number).
+
+**Layout.** The shell scripts own "get a suitable Python" (maintainer decision 2026-09-28); everything after that is one Python script:
+- `setup_once.bat` / `run.bat` → `tools\find_python.bat`; `setup_once.sh` / `run.sh` → `tools/find_python.sh` (sourced). They read `python-range.txt`, look for the newest Python in the range, and if there is none, offer the newest version in the range: `winget install --id Python.Python.3.13 -e` (Windows) or `brew install python@3.13` (Mac), only after a yes; on Linux they print the command. No winget / declined → python.org.
+- `tools/env_setup.py setup | run [args]`: standard library only, always started with a Python in the range, **never with the venv's own** (it may delete `.venv`, which Windows refuses while that Python runs; it checks and refuses).
+- `LARB_PYTHON_RANGE` (environment variable) overrides the file, for testing only.
+
+**Finding Python on Windows.** [found]
+- `py -3.13 -c "import sys; print(sys.executable)"` gives the full path; a missing version prints nothing on stdout, so the `for /f` loop just moves on.
+- ⚠ With a venv **activated** in the terminal (VS Code does it by itself), a bare `py` picks the venv (`py -0p` marks it `*`). The scripts always ask for a version (`py -3.x`), which ignores the venv.
+- ⚠ `python` / `python3` on this PC are only the Microsoft Store placeholders (`WindowsApps\python.exe`). With arguments they print a message on stderr and fail, so the fallback "`python` on PATH, if in range and not a venv" simply finds nothing. The scripts never rely on bare `python` otherwise.
+- The new Python install manager (python.org's default from 3.14) also provides `py`; how it answers `py -3.13` when 3.13 isn't installed was not tested. [verify]
+- ⚠ **winget's error codes are negative** (e.g. `0x8A150014`, "No package found"), so `if errorlevel 1` misses them: a failed install was reported as installed. Use `if not "%errorlevel%"=="0"`. [found]
+- `pause` with no console input (automated runs) returns at once, so `setup_once.bat` always pauses at the end (double-click: the window stays readable), and `run.bat` pauses only when started without arguments. [found]
+- Folder names with spaces work (tested). `%~dp0` is kept out of `( )` blocks, so brackets in a folder name can't break them (not tested).
+
+**The venv.** `.venv` is rebuilt when it's missing, its Python doesn't start, or its Python is outside the range; never otherwise ("rebuild, never repair", §2). The pinned libraries are installed when `.venv/larb-installed.txt` doesn't hold the hash of `requirements.txt`, so running setup again skips them, and a changed `requirements.txt` (after a `git pull`) is installed by the next `setup_once` or `run`. [found]
+- `run`'s automatic rebuild does the same as setup, including the static-ffmpeg download, but asks nothing (no install offers). Without the download, a rebuilt venv would have no FFmpeg on a PC without a system one. The *program* still never downloads (below).
+- `shutil.rmtree(onerror=…)` prints a deprecation warning on 3.12+; the script uses `onexc` there.
+
+**yt-dlp update.** `pip install -U yt-dlp --retries 1 --timeout 10` on every setup and run.
+- ⚠ **With yt-dlp already installed, pip exits with 0 when PyPI can't be reached** (it only prints `WARNING: Retrying (...)`). So the script decides from the output: with `-q`, a good run prints nothing; `Retrying` or `Could not fetch URL` means no connection → warning, continue with the installed version. Not installed at all → stop. [found]
+- Simulation: `PIP_INDEX_URL=http://127.0.0.1:9/simple` makes only pip fail, so the rest of the run can still reach YouTube. `HTTPS_PROXY=http://127.0.0.1:9` makes everything fail (pip, static-ffmpeg download).
+
+**A run never downloads FFmpeg** (fix approved 2026-09-28). `find_ffmpeg()` used `get_or_fetch_platform_executables_else_raise()`, which starts the 200 MB download when the binaries are missing. static-ffmpeg has no "path only" call, but it writes `bin/<platform>/installed.crumb` when a download is complete. `_static()` now uses the binaries only if that file exists (then the same call just returns the paths); `fetch_static()` is the download, called only by setup. Test: `test_locate.test_run_never_downloads_static_ffmpeg`. [found]
+
+**FFmpeg in setup.** `fetch_static()`, then `find_ffmpeg()` through the venv's Python, so setup and the program use one rule. A failed download prints one line (not the requests traceback) and falls back to the system FFmpeg. None usable: Windows offers `winget install --id Gyan.FFmpeg -e` (declined → gyan.dev), Mac `brew install ffmpeg`, Linux prints `sudo apt install ffmpeg` with a warning that the distribution's FFmpeg may be older than 7.1. [found on Windows, both branches: download blocked → system dev build accepted; system FFmpeg also hidden from PATH → offer shown, "n" installs nothing]
+
+**Measured (Windows).** [found]
+
+| Step | Time |
+| --- | --- |
+| `setup_once.bat`, fresh clone (Python 3.13), incl. static-ffmpeg download | **165 s** |
+| same, 3.11 / 3.12 clones | 124 s / 115 s |
+| `setup_once.bat` again, nothing to do | **4 s** |
+| `run.bat` with a 3.14 venv → rebuilt with 3.13, then the live sheet (songs cached) | 149 s |
+| `run.bat`, live sheet, 3 songs, audio, empty cache | 22 s (output 139.02 s = planned) |
+
+**Python versions.** All 75 tests pass on **3.11.9, 3.12.10 and 3.13.15** (each in a clone set up by `setup_once.bat` with `LARB_PYTHON_RANGE` set to that one version; ~62 s each), so the range stays `3.11-3.13` and 3.13 is the one offered. 3.14 builds a venv and installs every pin (57 s), but it's outside the range; tests not run on it. [found]
+
+**Pins.** On 3.11, `keyring` and `jaraco.context` also pull in `importlib_metadata`, `zipp` and `backports.tarfile` (not needed from 3.12): pinned with `; python_version < "3.12"`. After that, `pip freeze` on 3.11 shows nothing unpinned but yt-dlp. [found]
+
+**Line endings and permissions.** `.gitattributes`: `*.sh text eol=lf`, `*.bat text eol=crlf`, whoever commits. ⚠ A commit from Windows has no executable bit, so a Linux clone said `./setup_once.sh: Permission denied`: set in git with `git update-index --chmod=+x setup_once.sh run.sh` (mode `100755`). `tools/find_python.sh` is sourced, so it needs none. [found]

@@ -1,6 +1,6 @@
 # Hand-off Notes
 
-Gotchas for the next maintainer. Details and evidence live in [TECH.md](https://claude.ai/chat/TECH.md).
+Gotchas for the next maintainer. Details and evidence live in [TECH.md](TECH.md).
 
 ## Downloads failing?
 
@@ -50,7 +50,7 @@ FFmpeg does **not** fail when a song's end time is past the real length of the v
 ## Settings won't save, or won't load?
 
 - Windows refuses to replace `config.toml` while another program has it open (seen as "Access is denied"). Close whatever has it open; the program should retry by itself.
-- If you edit `config.toml` in Notepad, a "UTF-8 with BOM" save used to break Python's TOML reader. Reading with `utf-8-sig` fixes it ([TECH.md](https://claude.ai/chat/TECH.md) §5). Keep that in the code, it is not a typo.
+- If you edit `config.toml` in Notepad, a "UTF-8 with BOM" save used to break Python's TOML reader. Reading with `utf-8-sig` fixes it ([TECH.md](TECH.md) §5). Keep that in the code, it is not a typo.
 - Comments you type into `config.toml` disappear on the next save. That is normal; the commented reference is `config/example.toml`.
 
 ## Something went wrong: where's the log?
@@ -69,15 +69,45 @@ Long list? Run it in sections: rows `2-40` today, `41-80` tomorrow (`--rows 2-40
 
 ## Running it from a terminal
 
-From the project folder, in VS Code's terminal (PowerShell):
+Use the scripts; they do the environment for you (README, "Quick Start"):
 
 ```
-.venv\Scripts\Activate.ps1
-$env:PYTHONPATH="src"
-python -m larb "<sheet URL>"
+run.bat "<sheet URL>" [--rows 2-40] [--countdown <file or URL>] [--verbose]      (Windows)
+./run.sh "<sheet URL>" [...]                                                     (Linux/Mac)
 ```
 
-(In the old Command Prompt, the middle line is `set PYTHONPATH=src`; on Linux/Mac, `source .venv/bin/activate` and `export PYTHONPATH=src`.) The setup scripts will replace these steps once they exist.
+`run` checks `.venv` (rebuilds it by itself if it's missing or built with a Python outside the
+range), updates yt-dlp, puts `src` on the path, and starts `python -m larb` with your
+arguments. No need to activate the venv. For the tests: `.venv\Scripts\python.exe -m unittest`
+(Linux/Mac: `.venv/bin/python -m unittest`), from the project folder.
+
+## Setup problems?
+
+- **"No Python 3.x to 3.y was found".** Install the version it names (it goes next to any other
+  Python; don't uninstall anything), open a **new** terminal, and run `setup_once` again. On
+  Windows, `py -0p` lists the Pythons the scripts can see.
+- **Linux: "can't build a venv" / "tkinter is missing".** Debian/Ubuntu split these into
+  separate packages; setup prints the `sudo apt install ...` line to run. The scripts never run
+  `sudo` themselves. If `apt` can't find the Python version (e.g. Ubuntu 26.04 only has 3.14),
+  the deadsnakes archive has it (the command is printed too).
+- **"Couldn't delete the old .venv folder".** Something still uses it: another run window, or a
+  terminal/VS Code where it is activated. Close it and run again.
+- **Something weird with the venv?** Delete the `.venv` folder and run `setup_once` again. The
+  venv is disposable: rebuild, never repair. (It re-downloads FFmpeg, ~200 MB.)
+- **FFmpeg.** Setup downloads it into `.venv` (static-ffmpeg). If that fails, a system FFmpeg
+  7.1 or newer is used; otherwise setup offers to install one. A run never downloads FFmpeg.
+
+## Updating Python (every few years)
+
+yt-dlp drops Python versions once they reach end of life; when `run` warns that yt-dlp can't
+be updated even though the internet works, or setup can't install it, this is the likely cause.
+
+1. Install the new Python **alongside** the old one; don't uninstall anything yet.
+2. Change the range in `python-range.txt` (e.g. `3.12-3.14`).
+3. Delete the `.venv` folder and run `setup_once`: it builds the venv with the newest Python in
+   the range. (Without deleting, it keeps a venv whose Python is still in the range.)
+4. Run the tests. Pass → commit and tag a new CalVer release; only then uninstall the old
+   Python. Fail → usually a pinned library needs bumping; hand the error to an AI.
 
 ## Countdown from YouTube
 
