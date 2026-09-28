@@ -57,7 +57,8 @@ goto :python_org
 
 :winget
 winget install --id Python.Python.%WANT% -e
-if errorlevel 1 (
+rem Not "if errorlevel 1": winget's error codes are negative numbers (e.g. 0x8A150014).
+if not "%errorlevel%"=="0" (
     echo winget couldn't install it.
     goto :python_org
 )
