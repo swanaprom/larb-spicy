@@ -192,19 +192,31 @@ def update_yt_dlp() -> None:
 
     No internet: warn and keep the installed version. Not installed at all: stop.
     """
+    def installed_version() -> str:
+        found = venv_run("import yt_dlp.version as v; print(v.__version__)", capture=True)
+        return found.stdout.strip() if found.returncode == 0 else ""
+
+    before = installed_version()
     # pip install -U, not "yt-dlp -U" (that one is for the standalone yt-dlp program).
     # Short timeout and one retry, so a missing connection costs seconds, not minutes.
-    updated = pip("--upgrade", "--retries", "1", "--timeout", "10", "yt-dlp") == 0
-    found = venv_run("import yt_dlp.version as v; print(v.__version__)", capture=True)
-    installed = found.stdout.strip() if found.returncode == 0 else ""
-    if updated:
-        say(f"yt-dlp {installed} (latest).")
+    command = [str(venv_python()), "-m", "pip", "install", "--disable-pip-version-check", "-q",
+               "--upgrade", "--retries", "1", "--timeout", "10", "yt-dlp"]
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    # When yt-dlp is already installed, pip exits with 0 even if it couldn't reach PyPI
+    # (found 2026-09-28): only its warnings tell. Quiet (-q) and fine = no output at all.
+    output = result.stdout + result.stderr
+    offline = result.returncode != 0 or "Retrying" in output or "Could not fetch URL" in output
+    installed = installed_version()
+    if not offline:
+        change = f", updated from {before}" if before and before != installed else ""
+        say(f"yt-dlp {installed} (latest{change}).")
     elif installed:
         say(f"WARNING: couldn't update yt-dlp (no internet?). Continuing with the installed "
             f"version, {installed}.")
     else:
-        raise SetupError("yt-dlp isn't installed and couldn't be downloaded. Check the internet "
-                         "connection and try again.")
+        say(output.strip())
+        raise SetupError("yt-dlp isn't installed and couldn't be downloaded (see above). Check "
+                         "the internet connection and try again.")
 
 
 # --- FFmpeg ------------------------------------------------------------------------------
