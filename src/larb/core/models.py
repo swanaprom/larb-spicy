@@ -117,10 +117,17 @@ class ClipInfo:
     Attributes:
         duration_s: The real length of the whole file.
         peak_db: The loudest sample within the measured range, in dBFS (0 = full scale).
+        audio_s: Seconds of audio that actually decode within the measured range.
+            None = not known.
+        video_s: Seconds of video within the measured range. None = no video, or
+            not known. The renderer pads a short stream (silence, or the last
+            frame repeated); the core warns when that would hide a real gap.
     """
 
     duration_s: float
     peak_db: float
+    audio_s: float | None = None
+    video_s: float | None = None
 
 
 @dataclass(frozen=True)

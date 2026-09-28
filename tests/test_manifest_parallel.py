@@ -133,7 +133,8 @@ class ParallelManifestTest(PipelineTestCase):
                      countdown=CountdownSettings(default_urls=("https://cd",)))
         result = self.run_pipeline([row(2, "fx://a", "0:10-0:14")], media, "https://cd", s)
         self.assertEqual(result.songs_rendered, 1)
-        retries = [e.message for e in self.sink.events if e.stage == "countdown" and e.level is Level.WARNING]
+        retries = [e.message for e in self.sink.events if e.stage == "countdown" and e.level is Level.WARNING
+                   and "retry" in e.message]
         self.assertEqual(len(retries), 1)
 
     def test_countdown_lookup_failing_after_retries_aborts(self):

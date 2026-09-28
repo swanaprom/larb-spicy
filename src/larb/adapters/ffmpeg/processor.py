@@ -6,6 +6,7 @@ The recipes were measured (TECH §10, §16). Read those sections before changing
 anything here; several lines look optional but aren't.
 """
 
+import json
 import math
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -66,24 +67,38 @@ class FfmpegProcessor(MediaProcessor):
     # -- measuring -------------------------------------------------------------
 
     def measure(self, path: Path, start_s: float, end_s: float | None) -> ClipInfo:
-        probe = run_tool(self._tools.ffprobe, ["-v", "error", "-show_entries", "format=duration",
-                                               "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        probe = run_tool(self._tools.ffprobe, ["-v", "error", "-show_entries",
+                                               "format=duration:stream=codec_type,start_time,duration"
+                                               ":stream_disposition=attached_pic",
+                                               "-of", "json", str(path)],
                          self._log_command)
         try:
-            duration = float(probe.stdout.strip())
-        except ValueError:
+            info = json.loads(probe.stdout)
+            duration = float(info["format"]["duration"])
+        except (ValueError, KeyError):
             raise RenderError(f"Can't read the length of {path.name}") from None
+        streams = info.get("streams", [])
+        # A cover image (e.g. in an MP3) is a "video" stream too; it isn't video.
+        video = next((s for s in streams if s.get("codec_type") == "video"
+                      and not s.get("disposition", {}).get("attached_pic")), None)
+        audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        range_end = duration if end_s is None else end_s
 
         args = ["-hide_banner", "-nostats", "-ss", f"{start_s:.3f}"]
         if end_s is not None:
             args += ["-t", f"{max(end_s - start_s, 0.0):.3f}"]
-        # volumedetect reports the sample peak ("max_volume") of the range.
-        args += ["-i", str(path), "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-"]
+        # volumedetect reports the sample peak ("max_volume") of the range. -progress
+        # reports, on stdout, how much audio was actually decoded ("out_time_us").
+        # (volumedetect's own "n_samples" read 0 with FFmpeg 8's float decoders.)
+        args += ["-i", str(path), "-map", "0:a:0", "-af", "volumedetect",
+                 "-progress", "pipe:1", "-f", "null", "-"]
         result = run_tool(self._tools.ffmpeg, args, self._log_command)
         match = re.search(r"max_volume:\s*(-?[\d.]+|-inf) dB", result.stderr)
         # No match = nothing was decoded (range starts after the end of the file).
         peak = float(match.group(1)) if match else float("-inf")
-        return ClipInfo(duration_s=duration, peak_db=peak)
+        return ClipInfo(duration_s=duration, peak_db=peak,
+                        audio_s=_decoded_audio_s(result.stdout, audio is not None),
+                        video_s=_video_in_range_s(video, start_s, range_end))
 
     # -- rendering ---------------------------------------------------------------
 
@@ -171,6 +186,29 @@ class FfmpegProcessor(MediaProcessor):
         if frames != planned:
             raise RenderError(f"The {what} has {frames} frames but should have {planned} "
                               f"({plan.expected_duration_s:.3f} s at {FPS} fps)")
+
+
+def _decoded_audio_s(progress_log: str, has_audio: bool) -> float | None:
+    """Seconds of audio that actually decoded, from FFmpeg's -progress report (what
+    decodes, not what the container claims: they differ for Opus, TECH §16).
+    None if the file has no audio stream."""
+    if not has_audio:
+        return None
+    # The last report is the final one; "N/A" (nothing decoded) doesn't match.
+    values = re.findall(r"^out_time_us=(\d+)\s*$", progress_log, re.MULTILINE)
+    return int(values[-1]) / 1_000_000 if values else 0.0
+
+
+def _video_in_range_s(stream: dict | None, start_s: float, end_s: float) -> float | None:
+    """Seconds of the video stream inside [start_s, end_s], from the container's
+    stream start and length. None if there's no video, or no length for it (some
+    .webm files don't store one)."""
+    try:
+        v_start = float(stream.get("start_time", 0.0))
+        v_end = v_start + float(stream["duration"])
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    return max(0.0, min(end_s, v_end) - max(start_s, v_start))
 
 
 def frames_for(seconds: float) -> int:

@@ -11,7 +11,7 @@ from pathlib import Path
 from larb.core.cache import cache_stem, find_cached
 from larb.core.errors import (DownloadError, LarbError, MediaUnavailableError, RenderError)
 from larb.core.manifest import ParsedRow, RowProblem, parse_row, select_rows
-from larb.core.models import (DownloadSettings, Level, LogEvent, ManifestEntry, MediaInfo, MediaKind,
+from larb.core.models import (ClipInfo, DownloadSettings, Level,LogEvent, ManifestEntry, MediaInfo, MediaKind,
                               RenderPlan, RowRange, RunResult, Segment, Settings, SheetRow)
 from larb.core.ports import EventSink, MediaProcessor, MediaSource, SongListSource
 from larb.core.settings import validate_settings
@@ -22,7 +22,8 @@ SILENT_PEAK_DB = -60.0      # below this a clip is treated as silent: no gain, w
 OVERRUN_TRIM_LIMIT_S = 1.0  # end past the real length by up to this -> trim to fit (SPEC §9 stage 6)
 LENGTH_TOLERANCE_S = 0.1    # allowed difference between planned and actual output length
 RETRY_PAUSE_S = 1.0         # pause before retry n is n * this
-FRAME_S = 1 / 30            # one frame of the output (30 fps is the hard-coded format, SPEC §7)
+SHORT_STREAM_WARN_S = 0.5   # a clip's video or audio this much shorter than the clip -> warn
+FRAME_S = 1 / 30           # one frame of the output (30 fps is the hard-coded format, SPEC §7)
 MIN_CLIP_S = 3 * FRAME_S    # shorter clips can't hold a crossfade of even one frame on both sides
 RENDERING_SUFFIX = ".rendering"   # <name>.rendering.<ext>: output not checked yet
 FAILED_SUFFIX = "_FAILED"         # <name>_FAILED.<ext>: output rejected by the checks
@@ -320,6 +321,7 @@ class Pipeline:
         if info.duration_s < MIN_CLIP_S:
             raise LarbError(f"Countdown is {info.duration_s:.2f} s long; it must be at least "
                             f"{MIN_CLIP_S:.2f} s")
+        self._warn_short_streams(info, info.duration_s, "countdown", "countdown", None)
         gain = self._gain_for(info.peak_db, "countdown", None)
         self._log(Level.INFO, "countdown", f"{path.name}: {info.duration_s:.2f} s, gain {gain:+.1f} dB")
         return Segment(path, 0.0, info.duration_s, mirror=False, gain_db=gain)  # countdowns never mirror
@@ -413,6 +415,7 @@ class Pipeline:
                 self._log(Level.ERROR, "measure", f"skipped: clip is {end - start:.2f} s, "
                           f"shorter than {MIN_CLIP_S:.2f} s", entry.row_number)
                 continue
+            self._warn_short_streams(info, end - start, "measure", entry.display_name, entry.row_number)
             mirror = settings.processing.mirror and not entry.already_mirrored  # SPEC §8 Mirror rule
             gain = self._gain_for(info.peak_db, "measure", entry.row_number)
             segments.append((entry, Segment(path, start, end, mirror, gain)))
@@ -446,6 +449,22 @@ class Pipeline:
                           f"{song.duration_s:.2f} s: crossfades next to it shortened to {limit:.2f} s "
                           f"(setting {setting_s:g} s)", entry.row_number)
         return RenderPlan(tuple(segments), crossfades, kind.audio_only, kind.max_height, fade_out_s=fade_out)
+
+    def _warn_short_streams(self, info: ClipInfo, clip_s: float, stage: str, name: str,
+                            row: int | None) -> None:
+        """The renderer pads a stream that ends early (silence, or the last frame
+        repeated), so the output keeps its planned length. A few ms is normal (TECH §16);
+        more than SHORT_STREAM_WARN_S may be a real problem, e.g. a frozen picture.
+
+        Args:
+            info: Measured over the clip's range (padding included).
+            clip_s: The clip's planned length.
+        """
+        for stream, available, filler in (("video", info.video_s, "the last frame is repeated"),
+                                          ("audio", info.audio_s, "silence is added")):
+            if available is not None and clip_s - available > SHORT_STREAM_WARN_S:
+                self._log(Level.WARNING, stage, f"{name}: {stream} is {clip_s - available:.2f} s shorter "
+                          f"than the clip ({clip_s:.2f} s); {filler}", row)
 
     def _gain_for(self, peak_db: float, stage: str, row: int | None) -> float:
         """Peak normalization: bring the clip's loudest point to TARGET_PEAK_DB."""
