@@ -39,10 +39,26 @@ def _new_enough(version: tuple[int, int] | None) -> bool:
     return version is None or version >= MIN_VERSION
 
 
-def _static() -> tuple[Path, Path]:
+def fetch_static() -> tuple[Path, Path]:
+    """Download the static-ffmpeg binaries if they aren't there yet (~45 s, ~200 MB).
+
+    Only setup_once calls this (through tools/env_setup.py), showing the download
+    progress. A run never downloads: it uses `_static()` (TECH §3).
+    """
     from static_ffmpeg import run  # imported here: only this adapter may know about it
-    # static-ffmpeg prints download progress on stdout; keep it out of our console.
-    # It fetches binaries on first use (~45 s, ~200 MB); setup_once should trigger that (SPEC §16).
+    ffmpeg, ffprobe = run.get_or_fetch_platform_executables_else_raise()
+    return Path(ffmpeg), Path(ffprobe)
+
+
+def _static() -> tuple[Path, Path]:
+    """The static-ffmpeg binaries, only if setup_once has already downloaded them."""
+    from static_ffmpeg import run  # imported here: only this adapter may know about it
+    # static-ffmpeg writes this file when its download is complete. Without it, the call
+    # below would start the download, which is setup_once's job, not a run's.
+    if not (Path(run.get_platform_dir()) / "installed.crumb").exists():
+        raise FileNotFoundError("binaries not downloaded (setup_once downloads them)")
+    # With the download complete, this only returns the paths (and fixes permissions on
+    # Linux/Mac). It prints nothing then, but keep its stdout out of our console anyway.
     with contextlib.redirect_stdout(io.StringIO()):
         ffmpeg, ffprobe = run.get_or_fetch_platform_executables_else_raise()
     return Path(ffmpeg), Path(ffprobe)

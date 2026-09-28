@@ -1,6 +1,8 @@
-"""FFmpeg lookup: an FFmpeg older than 7.1 is refused with a clear message (offline)."""
+"""FFmpeg lookup: an FFmpeg older than 7.1 is refused with a clear message, and a run
+never downloads static-ffmpeg (offline)."""
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,6 +24,19 @@ class LocateTest(unittest.TestCase):
         self.assertIn("7.1 or newer", message)
         self.assertIn("system FFmpeg 4.4.2", message)
         self.assertIn("too old", message)
+
+    def test_run_never_downloads_static_ffmpeg(self):
+        """Without static-ffmpeg's 'download complete' file, a run uses the system FFmpeg
+        and never starts the download (only setup_once downloads, TECH §3)."""
+        from static_ffmpeg import run
+        with tempfile.TemporaryDirectory() as empty, \
+             mock.patch.object(run, "get_platform_dir", return_value=empty), \
+             mock.patch.object(run, "get_or_fetch_platform_executables_else_raise") as fetch, \
+             mock.patch.object(locate.shutil, "which", side_effect=lambda n: f"C:/sys/{n}.exe"), \
+             mock.patch.object(locate, "_read_version", return_value=("8.0", (8, 0))):
+            tools = locate.find_ffmpeg()
+        fetch.assert_not_called()
+        self.assertEqual(tools.origin, "system")
 
     def test_new_enough(self):
         self.assertFalse(locate._new_enough((7, 0)))
