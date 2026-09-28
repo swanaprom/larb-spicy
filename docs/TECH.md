@@ -551,3 +551,12 @@ Windows 11, i5-6400, home connection. Pythons installed side by side: 3.11.9, 3.
 **Pins.** On 3.11, `keyring` and `jaraco.context` also pull in `importlib_metadata`, `zipp` and `backports.tarfile` (not needed from 3.12): pinned with `; python_version < "3.12"`. After that, `pip freeze` on 3.11 shows nothing unpinned but yt-dlp. [found]
 
 **Line endings and permissions.** `.gitattributes`: `*.sh text eol=lf`, `*.bat text eol=crlf`, whoever commits. ⚠ A commit from Windows has no executable bit, so a Linux clone said `./setup_once.sh: Permission denied`: set in git with `git update-index --chmod=+x setup_once.sh run.sh` (mode `100755`). `tools/find_python.sh` is sourced, so it needs none. [found]
+
+**Linux (WSL, Ubuntu 26.04.1 LTS), fresh clone in `~/`** (not `/mnt/d`). [found 2026-09-28]
+- ⚠ **Ubuntu 26.04 ships only Python 3.14** (outside the range), and without `ensurepip` (venv) and tkinter. With no Python in the range, `setup_once.sh` printed `sudo apt install python3.13 python3.13-venv python3.13-tk`, plus the deadsnakes line for when apt can't find it: `sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt update`. deadsnakes has `python3.13`, `-venv` and `-tk` for 26.04 ("resolute"). The maintainer ran both; the scripts never use sudo.
+- `setup_once.sh`: **208 s** (static-ffmpeg fetched `v8.0/linux.zip`: FFmpeg `n8.0.1-48-g0592be14ff-20260116`). Again: 2 s. tkinter check: `tkinter: available` (python3.13-tk installed). If it were missing, it prints `sudo apt install python3.13-tk`; not seen live, since the only Python without it was the out-of-range 3.14.
+- `run.sh <live sheet>`: 34 s, audio output 139.02 s = planned (one intermittent 403, fixed by the usual retry, §9). All 75 tests pass (1 skipped: the Windows-only locked-file test).
+- Unpinned on Linux: `SecretStorage`, `jeepney` (from `keyring`), `cryptography`, `cffi`, `pycparser` (from `SecretStorage`). Pinned from this environment with `; sys_platform == "linux"`; after that only yt-dlp is unpinned. On Windows the markers skip them (checked). Mac: `keyring` needs nothing extra there, but not checked on a real Mac.
+- The executable bit on the `.sh` files had to be set in git (above). LF endings in the clone confirmed (`file`: no CRLF).
+
+**Not tested:** Mac (no Mac: Homebrew offer, `python-tk@3.13` hint); the Windows "yes" path with a real install (tested only with a version winget doesn't have, which fails → python.org); the Windows tkinter-missing message.
