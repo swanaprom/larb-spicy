@@ -86,3 +86,5 @@ The countdown can be a YouTube link (`--countdown <URL>`, or `countdown.default_
 ## What are recommended upgrades?
 
 - Expose some configs in TOML as 'Advanced Settings' into GUI, currently hide by design to keep it direct and minimal.
+- Final output length predictor before processing.
+- Remembering video lengths for each row between runs could help reduce Youtube counting requests per connection, for repetitive mass runs.
