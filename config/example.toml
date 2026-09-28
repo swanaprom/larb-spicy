@@ -3,7 +3,7 @@ directory = ""
 filename_template = ""   # {date}_{time}.mp4 — date + time only, no event name (ordering by time is sufficient; keeps the GUI uncramped)
 
 [countdown]
-default_urls = []
+default_urls = ["https://www.youtube.com/watch?v=qW9N8XjUkIE"]   # the dance group's countdown; YouTube links in quotes
 default_files = []
 
 [download]
