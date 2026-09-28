@@ -346,6 +346,9 @@ def run(args: list[str]) -> int:
     current = venv_version()
     if current is None or not low <= current <= high:
         # Same steps as setup_once, without questions: a run never asks to install anything.
+        # Said up front: minutes without a word would look like a freeze.
+        say("Rebuilding the environment, including a one-time FFmpeg download (~200 MB). "
+            "This can take a few minutes.")
         ensure_venv()
         ensure_ffmpeg(offer_install=False)
         check_tkinter()
