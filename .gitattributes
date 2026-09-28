@@ -1,0 +1,5 @@
+# Line endings for the scripts, whoever commits them and whatever their git settings:
+# Linux/Mac shells fail on CRLF ("bad interpreter: /bin/bash^M"), and cmd.exe misreads
+# labels and blocks in LF-only batch files.
+*.sh  text eol=lf
+*.bat text eol=crlf
