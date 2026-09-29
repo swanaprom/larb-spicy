@@ -326,6 +326,32 @@ def check_tkinter() -> None:
         f"will need it. To install it:\n    {how}")
 
 
+# --- fonts (Linux) ---------------------------------------------------------------------
+
+# Song titles are Thai, Korean and Japanese. Windows and Mac have fonts for all three; a
+# minimal Linux (e.g. WSL Ubuntu) may have none, and the window then shows boxes.
+FONT_LANGUAGES = {"th": "Thai", "ko": "Korean", "ja": "Japanese"}
+FONT_PACKAGES = {"apt": "fonts-thai-tlwg fonts-noto-cjk",
+                 "dnf": "google-noto-sans-thai-fonts google-noto-sans-cjk-fonts"}
+
+
+def check_fonts() -> None:
+    """Linux only: report missing fonts and how to install them (never installs: needs sudo)."""
+    if not sys.platform.startswith("linux") or shutil.which("fc-list") is None:
+        return
+    missing = [name for lang, name in FONT_LANGUAGES.items()
+               if not subprocess.run(["fc-list", f":lang={lang}", "family"], capture_output=True,
+                                     text=True).stdout.strip()]
+    if not missing:
+        say("Fonts: Thai, Korean and Japanese available.")
+        return
+    packages = FONT_PACKAGES.get(_linux_package_manager())
+    how = (f"sudo {_linux_package_manager()} install {packages}" if packages else
+           "install Noto fonts for Thai and CJK (often fonts-thai-tlwg and fonts-noto-cjk)")
+    say(f"WARNING: no font for {', '.join(missing)} text: song titles would show as boxes in the "
+        f"window. To install them:\n    {how}")
+
+
 # --- the two commands --------------------------------------------------------------------
 
 def setup() -> int:
@@ -335,9 +361,11 @@ def setup() -> int:
     update_yt_dlp()
     ensure_ffmpeg(offer_install=True)
     check_tkinter()
+    check_fonts()
     run_script = "run.bat" if sys.platform == "win32" else "./run.sh"
     say()
-    say(f"Setup finished in {time.monotonic() - start:.0f} s. Next: {run_script} \"<sheet URL>\"")
+    say(f"Setup finished in {time.monotonic() - start:.0f} s. Next: {run_script} opens the window "
+        f"(or {run_script} \"<sheet URL>\" for the terminal version).")
     return 0
 
 
@@ -352,22 +380,22 @@ def run(args: list[str]) -> int:
         ensure_venv()
         ensure_ffmpeg(offer_install=False)
         check_tkinter()
+        check_fonts()
     elif not STAMP.exists() or STAMP.read_text(encoding="utf-8").strip() != requirements_hash():
         ensure_venv()   # requirements.txt changed (e.g. after a git pull)
     update_yt_dlp()
 
     if not args:
-        # Started without arguments, e.g. double-clicked: ask for the sheet.
-        try:
-            source = input("Paste the Google Sheet URL (or a CSV file path) and press Enter: ")
-        except EOFError:
-            source = ""
-        source = source.strip().strip('"')
-        if not source:
-            say("Nothing entered, so nothing to do.")
+        # Started without arguments, e.g. double-clicked: open the window.
+        if venv_run("import tkinter", capture=True).returncode != 0:
+            check_tkinter()   # says how to install it
+            run_script = "run.bat" if sys.platform == "win32" else "./run.sh"
+            say(f"The window needs tkinter. The terminal version works without it: "
+                f"{run_script} \"<sheet URL>\".")
             return 1
-        args = [source]
+        say("Opening the window...")
 
+    # No arguments: the window; with arguments: the terminal version (larb/__main__.py).
     return subprocess.call([str(venv_python()), "-m", "larb", *args], env=venv_env())
 
 
