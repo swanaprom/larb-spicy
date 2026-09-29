@@ -21,13 +21,14 @@ from larb.core.cache import cache_summary, clear_cache
 from larb.core.errors import LarbError, StoppedError
 from larb.core.models import Level, LogEvent, Settings
 from larb.core.settings import correct_crossfade, ensure_folder, validate_settings
-from larb.gui import theme
+from larb.gui import shortcuts, system, theme
 from larb.gui.runner import Done, RunWorker, cache_folder
 from larb.gui.state import (ActiveDownloads, Fields, LogCounts, LogFilter, Phase, ProgressView,
                             bottom_row, clear_cache_question, controls, log_line, run_request,
                             settings_from_fields, shown_folder, shown_in_log, visible)
 from larb.gui.widgets import ColorButton, HoverHint, PlaceholderEntry, SweepBar, ask
 
+TITLE = "LARB - Spicy"
 POLL_MS = 100           # how often the window takes new events from the run
 TICK_MS = 1000          # how often the download timers move
 MAX_EVENTS_PER_POLL = 500   # keeps the window responsive when a burst of events arrives
@@ -60,7 +61,7 @@ class Window:
         self.log_filter = LogFilter.ALL
         self.download_rows: dict[str, tuple[tk.Frame, tk.Label, SweepBar, tk.Label]] = {}
 
-        root.title("Random Dance combiner")
+        root.title(TITLE)
         outer = tk.Frame(root, bg=theme.BG, padx=10, pady=10)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
@@ -72,25 +73,27 @@ class Window:
         self._load_fields(settings)
         self._apply_controls()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
+        shortcuts.install(root)
 
         # A fixed minimum size: below it nothing shrinks further (GUI.md).
         root.update_idletasks()
         root.minsize(root.winfo_reqwidth(), root.winfo_reqheight())
         root.geometry(f"{max(root.winfo_reqwidth(), 900)}x{max(root.winfo_reqheight(), 720)}")
+        system.style_window(root)
 
     # -- building ------------------------------------------------------------------
 
-    def _pane(self, master, title: str) -> ttk.Frame:
-        pane = ttk.Frame(master, style="Pane.TFrame", padding=(12, 8, 12, 10))
-        ttk.Label(pane, text=title, style="Heading.TLabel").grid(row=0, column=0, columnspan=3,
-                                                                  sticky="w", pady=(0, 6))
-        return pane
+    @staticmethod
+    def _pane(master) -> ttk.Frame:
+        # No pane titles: the three panes speak for themselves (maintainer decision).
+        # Grid row 0 is left empty, so the rows below keep their numbers.
+        return ttk.Frame(master, style="Pane.TFrame", padding=(12, 10, 12, 10))
 
     def _browse_button(self, master, command) -> ColorButton:
         return ColorButton(master, "Browse", command, bg=theme.BUTTON, font=self.fonts.normal, pady=3)
 
     def _build_top(self, master) -> ttk.Frame:
-        pane = self._pane(master, "1. WHAT TO MAKE")
+        pane = self._pane(master)
         pane.columnconfigure(1, weight=1)
         pad = {"pady": 3}
 
@@ -164,7 +167,7 @@ class Window:
         return pane
 
     def _build_middle(self, master) -> ttk.Frame:
-        pane = self._pane(master, "2. WHAT'S HAPPENING")
+        pane = self._pane(master)
         pane.columnconfigure(0, weight=1)
         pane.rowconfigure(2, weight=1)
 

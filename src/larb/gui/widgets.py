@@ -4,7 +4,7 @@ hover hints, the sweeping download bar, and the dark dialogs."""
 import tkinter as tk
 from tkinter import ttk
 
-from larb.gui import theme
+from larb.gui import system, theme
 
 
 class ColorButton(tk.Label):
@@ -229,6 +229,7 @@ def ask(parent: tk.Misc, title: str, message: str, buttons: list[tuple[str, str]
     x = top.winfo_rootx() + (top.winfo_width() - dialog.winfo_reqwidth()) // 2
     y = top.winfo_rooty() + (top.winfo_height() - dialog.winfo_reqheight()) // 3
     dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+    system.style_window(dialog)
     dialog.grab_set()
     if focus is not None:
         focus.focus_set()

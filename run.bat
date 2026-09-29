@@ -14,7 +14,7 @@ setlocal
 if not "%~1"=="" goto :start
 if defined LARB_MINIMIZED goto :start
 set "LARB_MINIMIZED=1"
-start "Random Dance combiner (console)" /min cmd /c call "%~f0"
+start "LARB - Spicy (console)" /min cmd /c call "%~f0"
 exit /b 0
 :start
 call "%~dp0tools\find_python.bat"

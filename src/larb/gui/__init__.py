@@ -14,6 +14,7 @@ def main() -> int:
 
     from larb import app
     from larb.core.errors import LarbError
+    from larb.gui import system
     from larb.gui.widgets import ask
     from larb.gui.window import Window
 
@@ -25,6 +26,7 @@ def main() -> int:
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except (AttributeError, OSError):
             pass
+    system.set_app_identity()   # before the first window: the taskbar shows our icon, not Python's
 
     root = tk.Tk()
     store = app.settings_store()
@@ -37,24 +39,5 @@ def main() -> int:
         return 1
     mac = sys.platform == "darwin" or os.environ.get("LARB_GUI_MAC") == "1"
     Window(root, store, settings, mac)
-    _dark_title_bar(root)
     root.mainloop()
     return 0
-
-
-def _dark_title_bar(root) -> None:
-    """Windows 10/11 draw the title bar in the system's light colours unless asked;
-    the rest of the window is dark (fixed theme). Elsewhere, nothing to do."""
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-        root.update_idletasks()
-        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
-        value = ctypes.c_int(1)
-        for attribute in (20, 19):   # DWMWA_USE_IMMERSIVE_DARK_MODE (19 on older Windows 10 builds)
-            if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(value),
-                                                         ctypes.sizeof(value)) == 0:
-                break
-    except (AttributeError, OSError):
-        pass

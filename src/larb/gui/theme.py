@@ -59,7 +59,6 @@ class Fonts:
         family = _family()
         self.normal = tkfont.Font(family=family, size=10)
         self.bold = tkfont.Font(family=family, size=10, weight="bold")
-        self.heading = tkfont.Font(family=family, size=10, weight="bold")
         self.small = tkfont.Font(family=family, size=9)
         self.run = tkfont.Font(family=family, size=13, weight="bold")
         self.log = tkfont.Font(family=family, size=10)
@@ -79,7 +78,6 @@ def apply(root: tk.Tk) -> Fonts:
                     focuscolor=NEON)
     style.configure("Pane.TFrame", background=PANE)
     style.configure("TLabel", background=PANE, foreground=TEXT)
-    style.configure("Heading.TLabel", background=PANE, foreground=TEXT, font=fonts.heading)
     style.configure("Muted.TLabel", background=PANE, foreground=MUTED)
     style.configure("Progress.TLabel", background=PANE, foreground=TEXT, font=fonts.bold)
     style.configure("Stopped.TLabel", background=PANE, foreground=RED, font=fonts.bold)
@@ -87,10 +85,12 @@ def apply(root: tk.Tk) -> Fonts:
                     bordercolor=BORDER, lightcolor=FIELD, darkcolor=FIELD, padding=4)
     style.map("TEntry", fieldbackground=[("disabled", PANE)], foreground=[("disabled", DISABLED_TEXT)],
               bordercolor=[("focus", NEON)], lightcolor=[("focus", NEON)])
-    style.configure("TRadiobutton", background=PANE, foreground=TEXT, indicatorbackground=FIELD,
-                    indicatorforeground=NEON, indicatorcolor=FIELD, indicatorrelief="flat")
-    # The selected dot is NEON (GUI.md).
-    style.map("TRadiobutton", indicatorcolor=[("selected", NEON), ("disabled", PANE)],
+    # 'clam' draws the circle with indicatorbackground and the dot with indicatorforeground.
+    # White circles when usable, dark grey when greyed out (e.g. Mirror in Audio mode);
+    # the selected dot is NEON (GUI.md).
+    style.configure("TRadiobutton", background=PANE, foreground=TEXT, indicatorbackground=WHITE,
+                    indicatorforeground=NEON, upperbordercolor=BORDER, lowerbordercolor=BORDER)
+    style.map("TRadiobutton", indicatorbackground=[("disabled", FIELD), ("pressed", "#D8D8D8")],
               foreground=[("disabled", DISABLED_TEXT)], background=[("active", PANE)])
     style.configure("Neon.Horizontal.TProgressbar", troughcolor=BAR_TROUGH, background=NEON,
                     bordercolor=BAR_TROUGH, lightcolor=NEON, darkcolor=NEON, thickness=14)
