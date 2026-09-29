@@ -53,3 +53,8 @@ class MediaToolMissingError(LarbError):
 
 class RenderError(LarbError):
     """Measuring or rendering failed, or the result doesn't match what was planned."""
+
+
+class StoppedError(LarbError):
+    """The operator stopped the run. Any port call may raise it once the adapter's
+    cancel() was called; the pipeline then ends the run like a failed one (SPEC §9)."""

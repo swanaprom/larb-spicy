@@ -9,13 +9,14 @@ anything here; several lines look optional but aren't.
 import json
 import math
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
 from larb.adapters.ffmpeg.helper import run_tool
 from larb.adapters.ffmpeg.locate import FfmpegTools
-from larb.core.errors import RenderError
+from larb.core.errors import RenderError, StoppedError
 from larb.core.models import ClipInfo, Level, LogEvent, RenderPlan
 from larb.core.ports import EventSink, MediaProcessor
 
@@ -56,10 +57,16 @@ class FfmpegProcessor(MediaProcessor):
         self._tools = tools
         self._work_dir = work_dir
         self._events = events
+        self._stop = threading.Event()   # set by cancel(); every FFmpeg run watches it
         work_dir.mkdir(parents=True, exist_ok=True)
 
     def describe(self) -> str:
         return f"FFmpeg {self._tools.version_text} ({self._tools.origin})"
+
+    def cancel(self) -> None:
+        # Running FFmpeg processes get "q" (then a kill, if needed) from run_tool;
+        # later calls raise StoppedError before starting anything.
+        self._stop.set()
 
     def _log_command(self, command: str) -> None:
         self._events.emit(LogEvent(Level.DEBUG, "ffmpeg", command))
@@ -71,7 +78,7 @@ class FfmpegProcessor(MediaProcessor):
                                                "format=duration:stream=codec_type,start_time,duration"
                                                ":stream_disposition=attached_pic",
                                                "-of", "json", str(path)],
-                         self._log_command)
+                         self._log_command, stop=self._stop)
         try:
             info = json.loads(probe.stdout)
             duration = float(info["format"]["duration"])
@@ -92,7 +99,7 @@ class FfmpegProcessor(MediaProcessor):
         # (volumedetect's own "n_samples" read 0 with FFmpeg 8's float decoders.)
         args += ["-i", str(path), "-map", "0:a:0", "-af", "volumedetect",
                  "-progress", "pipe:1", "-f", "null", "-"]
-        result = run_tool(self._tools.ffmpeg, args, self._log_command)
+        result = run_tool(self._tools.ffmpeg, args, self._log_command, stop=self._stop)
         match = re.search(r"max_volume:\s*(-?[\d.]+|-inf) dB", result.stderr)
         # No match = nothing was decoded (range starts after the end of the file).
         peak = float(match.group(1)) if match else float("-inf")
@@ -142,7 +149,7 @@ class FfmpegProcessor(MediaProcessor):
                                           "-f", "concat", "-safe", "0", "-i", str(list_file),
                                           "-i", str(audio_file), "-map", "0:v", "-map", "1:a",
                                           "-c", "copy", "-movflags", "+faststart", str(output_path)],
-                     self._log_command)
+                     self._log_command, stop=self._stop)
             self._check_frames(output_path, plan, "joined video")
         finally:
             for f in (audio_file, list_file, *chunk_files):
@@ -168,7 +175,11 @@ class FfmpegProcessor(MediaProcessor):
             args += ["-map", "[vout]", "-frames:v", str(frames_for(plan.expected_duration_s)), *VIDEO_ARGS]
         if audio:
             args += ["-map", "[aout]", *(MP3_ARGS if out.suffix == ".mp3" else VIDEO_AUDIO_ARGS)]
-        run_tool(self._tools.ffmpeg, [*args, str(out)], self._log_command)
+        try:
+            run_tool(self._tools.ffmpeg, [*args, str(out)], self._log_command, stop=self._stop)
+        except StoppedError:
+            graph_file.unlink(missing_ok=True)   # a stop isn't a failure: nothing to debug
+            raise
         graph_file.unlink(missing_ok=True)   # kept only when the run failed, for debugging
 
     def _check_frames(self, path: Path, plan: RenderPlan, what: str) -> None:
@@ -177,7 +188,7 @@ class FfmpegProcessor(MediaProcessor):
         probe = run_tool(self._tools.ffprobe, ["-v", "error", "-select_streams", "v:0", "-count_packets",
                                                "-show_entries", "stream=nb_read_packets",
                                                "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-                         self._log_command)
+                         self._log_command, stop=self._stop)
         try:
             frames = int(probe.stdout.strip())
         except ValueError:

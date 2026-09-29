@@ -8,13 +8,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from larb.core.cache import cache_stem, find_cached
-from larb.core.errors import (DownloadError, LarbError, MediaUnavailableError, RenderError)
+from larb.core.cache import cache_stem, find_cached, remove_leftovers
+from larb.core.errors import (DownloadError, LarbError, MediaUnavailableError, RenderError,
+                              StoppedError)
 from larb.core.manifest import ParsedRow, RowProblem, parse_row, select_rows
-from larb.core.models import (ClipInfo, DownloadSettings, Level,LogEvent, ManifestEntry, MediaInfo, MediaKind,
-                              RenderPlan, RowRange, RunResult, Segment, Settings, SheetRow)
+from larb.core.models import (Activity, ClipInfo, DownloadSettings, Level, LogEvent, ManifestEntry,
+                              MediaInfo, MediaKind, RenderPlan, RowRange, RunResult, Segment, Settings,
+                              SheetRow)
 from larb.core.ports import EventSink, MediaProcessor, MediaSource, SongListSource
-from larb.core.settings import validate_settings
+from larb.core.settings import ensure_folder, resolve_folder, validate_settings
 
 PADDING_S = 1.0             # each song starts 1 s early and ends 1 s late (SPEC §4 "Padding")
 TARGET_PEAK_DB = -1.0       # peak normalization target, hard-coded (SPEC §7, §9)
@@ -27,6 +29,7 @@ FRAME_S = 1 / 30           # one frame of the output (30 fps is the hard-coded f
 MIN_CLIP_S = 3 * FRAME_S    # shorter clips can't hold a crossfade of even one frame on both sides
 RENDERING_SUFFIX = ".rendering"   # <name>.rendering.<ext>: output not checked yet
 FAILED_SUFFIX = "_FAILED"         # <name>_FAILED.<ext>: output rejected by the checks
+STOPPED_MESSAGE = "Stopped by the operator"
 
 # Characters Windows doesn't allow in file names.
 _ILLEGAL_FILENAME_CHARS = set('<>:"/\\|?*')
@@ -97,21 +100,49 @@ class _RowCheck:
 class Pipeline:
     """One run of the whole compilation.
 
+    Can be stopped from another thread with stop(). One Pipeline is one run.
+
     Args:
-        workspace: Where runtime files go. Default cache and output folders live
-            here, and relative folder settings are resolved against it.
+        workspace: Where runtime files go. Default cache and output folders live here.
+        project_dir: The project folder; relative folder settings start here
+            (settings.resolve_folder). Default: the folder holding `workspace`.
     """
 
     def __init__(self, songs: SongListSource, media: MediaSource, processor: MediaProcessor,
-                 events: EventSink, workspace: Path) -> None:
+                 events: EventSink, workspace: Path, project_dir: Path | None = None) -> None:
         self._songs = songs
         self._media = media
         self._processor = processor
         self._events = events
         self._workspace = workspace
+        self._project_dir = project_dir or workspace.parent
         self._counts_lock = threading.Lock()
         self._errors = 0
         self._warnings = 0
+        self._stop = threading.Event()
+
+    # -- stopping ----------------------------------------------------------
+
+    def stop(self) -> None:
+        """Ask the run to stop (SPEC §9 "Stopped by the operator"). Returns at once;
+        run() then raises StoppedError as soon as it can. Safe from any thread.
+
+        A look-up already running finishes first; downloads and FFmpeg stop. The
+        outcome is the same as any failed run: nothing unverified gets the final
+        output name, finished downloads stay cached, interrupted ones are removed.
+        """
+        self._stop.set()
+        self._media.cancel()
+        self._processor.cancel()
+
+    def _check_stop(self) -> None:
+        if self._stop.is_set():
+            raise StoppedError(STOPPED_MESSAGE)
+
+    def _pause(self, seconds: float) -> None:
+        """Wait before a retry; a stop ends the wait at once."""
+        if self._stop.wait(seconds):
+            raise StoppedError(STOPPED_MESSAGE)
 
     # -- logging helpers ---------------------------------------------------
 
@@ -140,16 +171,27 @@ class Pipeline:
             rows: Only use these sheet rows. None = all rows.
 
         Raises:
+            StoppedError: stop() was called.
             LarbError: The run can't produce an output (no songs left, sheet
                 unreadable, FFmpeg missing, render failed, ...).
         """
-        now = now or datetime.now()
+        try:
+            return self._run(source, countdown, settings, now or datetime.now(), rows)
+        except StoppedError:
+            # Adapters say only "Stopped"; one message for every way a stop ends a run.
+            raise StoppedError(STOPPED_MESSAGE) from None
+
+    def _run(self, source: str, countdown: str, settings: Settings, now: datetime,
+             rows: RowRange | None) -> RunResult:
         # Stage 1: lock settings. `settings` is frozen and used as-is for the whole run;
         # changes made elsewhere during the run are not picked up (SPEC §5).
         validate_settings(settings)
         kind = MediaKind(settings.processing.audio_only, settings.download.max_height)
-        cache_dir = self._resolve_dir(settings.download.cache_directory, "cache")
-        output_dir = self._resolve_dir(settings.output.directory, "output")
+        # Folders first, so one that can't be created stops the run before any download.
+        cache_dir = ensure_folder(resolve_folder(settings.download.cache_directory, "cache",
+                                                 self._project_dir, self._workspace), "cache")
+        output_dir = ensure_folder(resolve_folder(settings.output.directory, "output",
+                                                  self._project_dir, self._workspace), "output")
         self._remove_leftover_renders(output_dir)
         self._log(Level.INFO, "settings", f"Mode: {'audio only' if kind.audio_only else f'video up to {kind.max_height}p'}, "
                   f"mirror: {'on' if settings.processing.mirror else 'off'}. Media tool: {self._processor.describe()}")
@@ -157,21 +199,25 @@ class Pipeline:
         # Stage 2: fetch the song list.
         self._log(Level.INFO, "sheet", f"Reading song list: {source}")
         sheet_rows = self._songs.fetch_rows(source)
+        self._check_stop()
         self._log(Level.INFO, "sheet", f"{len(sheet_rows)} row(s) found")
         if rows is not None:
             sheet_rows = select_rows(sheet_rows, rows)
-            self._log(Level.INFO, "sheet", f"Using rows {rows.first}-{rows.last}: "
+            self._log(Level.INFO, "sheet", f"Using rows {rows.describe()}: "
                       f"{len(sheet_rows)} row(s) with content")
 
         # Stage 3: prepare the countdown before the manifest on purpose: a run can't succeed
         # without it, so a bad one should stop the run before minutes of manifest look-ups.
         countdown_segment = self._prepare_countdown(countdown, kind, cache_dir, settings)
+        self._check_stop()
 
         # Stage 4: build the manifest (offline rules, then ask the media source).
         entries = self._build_manifest(sheet_rows, settings.download)
+        self._check_stop()
 
         # Stage 5: download songs (cached ones are skipped).
         paths = self._download_all(entries, kind, cache_dir, settings.download)
+        self._check_stop()
 
         # Stage 6: check real lengths and measure peaks.
         songs = self._measure_songs(entries, paths, settings)
@@ -179,6 +225,7 @@ class Pipeline:
             raise LarbError("No usable songs left, nothing to render. See the errors above.")
 
         # Stage 7: render.
+        self._check_stop()
         plan = self._build_plan(countdown_segment, songs, settings.processing.crossfade_duration_seconds, kind)
         output = self._output_path(output_dir, settings.output.filename_template, kind, now)
         self._log(Level.INFO, "render", f"Rendering {len(songs)} song(s), "
@@ -191,13 +238,6 @@ class Pipeline:
         return RunResult(output, len(songs), self._errors, self._warnings, cache_dir)
 
     # -- stage helpers ---------------------------------------------------------
-
-    def _resolve_dir(self, setting: str, default_name: str) -> Path:
-        path = Path(setting) if setting else Path(default_name)
-        if not path.is_absolute():
-            path = self._workspace / path
-        path.mkdir(parents=True, exist_ok=True)
-        return path
 
     def _build_manifest(self, rows: list[SheetRow], dl: DownloadSettings) -> list[ManifestEntry]:
         """Check every row, looking videos up max_parallel_lookups at a time.
@@ -213,6 +253,8 @@ class Pipeline:
 
         def check(row: SheetRow) -> _RowCheck:
             nonlocal done
+            if self._stop.is_set():   # rows still waiting are never looked up
+                return _RowCheck(row.row_number)
             result = self._check_row(row, dl.max_retries)
             with done_lock:   # also keeps the progress events in counting order
                 done += 1
@@ -275,7 +317,7 @@ class Pipeline:
                 if attempt == max_retries or not e.retryable:
                     raise
                 note_retry(f"look-up retry {attempt + 1}/{max_retries}: {e}")
-                time.sleep(RETRY_PAUSE_S * (attempt + 1))
+                self._pause(RETRY_PAUSE_S * (attempt + 1))
         raise AssertionError("unreachable: the loop always returns or raises")
 
     def _prepare_countdown(self, countdown: str, kind: MediaKind, cache_dir: Path,
@@ -341,11 +383,26 @@ class Pipeline:
             else:
                 todo.append(entry)
         if todo:
-            self._log(Level.INFO, "download", f"Downloading {len(todo)} video(s), "
-                      f"up to {dl.max_parallel_downloads} at once")
+            total = len(todo)
+            self._log(Level.INFO, "download", f"Downloading {total} video(s), "
+                      f"up to {dl.max_parallel_downloads} at once", progress=(0, total))
+            done = 0
+            done_lock = threading.Lock()
+
+            def download(entry: ManifestEntry) -> tuple[ManifestEntry, Path | None]:
+                nonlocal done
+                if self._stop.is_set():   # downloads still waiting never start
+                    return entry, None
+                path = self._download_one(entry, kind, cache_dir, dl.max_retries)
+                with done_lock:
+                    done += 1
+                    self._log(Level.DEBUG, "download", f"downloaded {done}/{total}", progress=(done, total))
+                return entry, path
+
             with ThreadPoolExecutor(max_workers=dl.max_parallel_downloads) as pool:
-                results = pool.map(lambda e: (e, self._download_one(e, kind, cache_dir, dl.max_retries)), todo)
-                for entry, path in results:
+                # A StoppedError from a worker comes out here; leaving the "with" still
+                # waits for the other downloads, which stop too (the media source is cancelled).
+                for entry, path in pool.map(download, todo):
                     if path:
                         paths[entry.media.media_id] = path
         return paths
@@ -365,28 +422,51 @@ class Pipeline:
                                kind: MediaKind, cache_dir: Path, max_retries: int) -> Path:
         """Download one video (song or countdown), retrying retryable errors up to max_retries times.
 
+        Emits one "started" and one "ended" Activity event however many tries it
+        takes, so the GUI shows one line per download.
+
         Raises:
             DownloadError: The last try failed, or the error isn't worth retrying.
+            StoppedError: The run was stopped; what the download left behind is removed.
         """
-        for attempt in range(max_retries + 1):
-            try:
-                path = self._media.download(url, kind, cache_dir, stem)
-                self._log(Level.INFO, "download", f"done: {name} ({path.name})", row)
-                return path
-            except DownloadError as e:
-                if attempt == max_retries or not e.retryable:
-                    raise
-                self._log(Level.WARNING, "download", f"retry {attempt + 1}/{max_retries}: {name}: {e}", row)
-                time.sleep(RETRY_PAUSE_S * (attempt + 1))
-        raise AssertionError("unreachable: the loop always returns or raises")
+        self._log_activity(Activity(stem, name, started=True), row)
+        try:
+            for attempt in range(max_retries + 1):
+                self._check_stop()
+                try:
+                    path = self._media.download(url, kind, cache_dir, stem)
+                    self._log(Level.INFO, "download", f"done: {name} ({path.name})", row)
+                    return path
+                except DownloadError as e:
+                    if attempt == max_retries or not e.retryable:
+                        raise
+                    self._log(Level.WARNING, "download", f"retry {attempt + 1}/{max_retries}: {name}: {e}", row)
+                    self._pause(RETRY_PAUSE_S * (attempt + 1))
+            raise AssertionError("unreachable: the loop always returns or raises")
+        except StoppedError:
+            for path in remove_leftovers(cache_dir, stem):
+                self._log(Level.INFO, "download", f"removed unfinished download {path.name}", row)
+            raise
+        finally:
+            self._log_activity(Activity(stem, name, started=False), row)
+
+    def _log_activity(self, activity: Activity, row: int | None) -> None:
+        """A marker for the GUI's active-download lines. DEBUG: the log file keeps it,
+        the console and the GUI's log don't show it."""
+        what = "started" if activity.started else "ended"
+        self._events.emit(LogEvent(Level.DEBUG, "download", f"{what}: {activity.label}", row,
+                                   activity=activity))
 
     def _measure_songs(self, entries, paths: dict[str, Path],
                        settings: Settings) -> list[tuple[ManifestEntry, Segment]]:
         segments = []
-        for entry in entries:
-            path = paths.get(entry.media.media_id)
-            if path is None:
-                continue  # download failed, already reported
+        todo = [entry for entry in entries if entry.media.media_id in paths]  # failed ones are reported
+        for n, entry in enumerate(todo, 1):
+            self._check_stop()
+            # DEBUG: progress for the GUI's label, too many lines for the console.
+            self._log(Level.DEBUG, "measure", f"measuring {n}/{len(todo)}", entry.row_number,
+                      progress=(n - 1, len(todo)))
+            path = paths[entry.media.media_id]
             try:
                 info = self._processor.measure(path, max(0.0, entry.start_s - PADDING_S),
                                                entry.end_s + PADDING_S)
@@ -526,6 +606,12 @@ class Pipeline:
             self._verify_output(rendering, plan)
         except RenderError as e:
             raise RenderError(f"{e}{self._keep_failed(rendering, output)}") from None
+        except StoppedError:
+            # A stopped render is unverified like a failed one (SPEC §9).
+            note = self._keep_failed(rendering, output)
+            if note:
+                self._log(Level.INFO, "render", note.strip())
+            raise
         final = _free_name(output)   # never overwrite an earlier output
         rendering.rename(final)
         return final

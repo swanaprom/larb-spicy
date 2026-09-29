@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fakes import ROOT, RecordingSink  # noqa: E402
 from larb.adapters import ytdlp_media  # noqa: E402
-from larb.core.errors import DownloadError, MediaUnavailableError  # noqa: E402
+from larb.core.errors import DownloadError, MediaUnavailableError, StoppedError  # noqa: E402
 from larb.core.models import Level, MediaKind  # noqa: E402
 
 VIDEO = "https://www.youtube.com/watch?v=abcdefghijk"
@@ -29,6 +29,7 @@ class FakeYoutubeDL:
     calls: list[tuple] = []
     reuse_error: str | None = None      # process_ie_result raises this, if set
     lookup_error: str | None = None     # extract_info raises this, if set
+    while_downloading = None            # called mid-download (e.g. the adapter's cancel), if set
 
     def __init__(self, options):
         self.options = options
@@ -57,6 +58,11 @@ class FakeYoutubeDL:
 
     def _fake_download(self, info):
         path = Path(self.options["outtmpl"].replace("%(ext)s", "webm"))
+        if FakeYoutubeDL.while_downloading:
+            Path(f"{path}.part").write_bytes(b"half")
+            FakeYoutubeDL.while_downloading()
+            for hook in self.options.get("progress_hooks", []):   # yt-dlp calls these as data arrives
+                hook({"status": "downloading"})
         path.write_bytes(b"fake")
         return {**info, "requested_downloads": [{"filepath": str(path)}]}
 
@@ -69,6 +75,7 @@ class YtDlpReuseTest(unittest.TestCase):
         FakeYoutubeDL.calls = []
         FakeYoutubeDL.reuse_error = None
         FakeYoutubeDL.lookup_error = None
+        FakeYoutubeDL.while_downloading = None
         patcher = mock.patch.object(ytdlp_media.yt_dlp, "YoutubeDL", FakeYoutubeDL)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -145,6 +152,30 @@ class YtDlpReuseTest(unittest.TestCase):
         with self.assertRaises(MediaUnavailableError) as caught:
             self.source.lookup(VIDEO)
         self.assertTrue(caught.exception.retryable)
+
+
+class YtDlpCancelTest(unittest.TestCase):
+    """cancel() (slice 5): downloads stop in yt-dlp's progress hook; later calls don't start."""
+
+    setUp = YtDlpReuseTest.setUp
+    tearDown = YtDlpReuseTest.tearDown
+
+    def test_cancel_mid_download(self):
+        self.source.lookup(VIDEO)
+        FakeYoutubeDL.while_downloading = self.source.cancel
+        with self.assertRaises(StoppedError):
+            self.source.download(VIDEO, AUDIO, self.dir, "abcdefghijk_audio")
+        # Not retried with a fresh look-up, and the partial file is left for the core to remove.
+        self.assertEqual([c[0] for c in FakeYoutubeDL.calls], ["extract", "reuse"])
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["abcdefghijk_audio.webm.part"])
+
+    def test_calls_after_cancel_start_nothing(self):
+        self.source.cancel()
+        with self.assertRaises(StoppedError):
+            self.source.lookup(VIDEO)
+        with self.assertRaises(StoppedError):
+            self.source.download(VIDEO, AUDIO, self.dir, "abcdefghijk_audio")
+        self.assertEqual(FakeYoutubeDL.calls, [])
 
 
 if __name__ == "__main__":

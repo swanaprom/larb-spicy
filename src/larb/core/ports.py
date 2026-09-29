@@ -74,6 +74,16 @@ class MediaSource(ABC):
         Raises:
             DownloadError: The download failed. Its `retryable` flag says whether
                 trying again might help.
+            StoppedError: cancel() was called. Leftover pieces of this download
+                may remain in dest_dir, named <stem>.*; the caller removes them.
+        """
+
+    @abstractmethod
+    def cancel(self) -> None:
+        """Stop: a download in progress ends as soon as it can, and every later call
+        raises StoppedError at once. A look-up in progress may finish first.
+
+        Safe to call from any thread. Can't be undone: a new run uses a new instance.
         """
 
 
@@ -90,6 +100,7 @@ class MediaProcessor(ABC):
 
         Raises:
             RenderError: The file can't be read.
+            StoppedError: cancel() was called.
         """
 
     @abstractmethod
@@ -103,15 +114,24 @@ class MediaProcessor(ABC):
         Raises:
             MediaToolMissingError: The media tool isn't available.
             RenderError: Rendering failed.
+            StoppedError: cancel() was called.
         """
 
     @abstractmethod
     def describe(self) -> str:
         """Which tool is used and its version, for the log at run start."""
 
+    @abstractmethod
+    def cancel(self) -> None:
+        """Stop: measuring or rendering in progress ends as soon as it can (a partial
+        output may be left at output_path), and every later call raises StoppedError.
+
+        Safe to call from any thread. Can't be undone: a new run uses a new instance.
+        """
+
 
 class EventSink(ABC):
-    """Receives log events as they happen (the console now, the GUI later)."""
+    """Receives log events as they happen (the console, the log file, the GUI)."""
 
     @abstractmethod
     def emit(self, event: LogEvent) -> None:

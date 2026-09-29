@@ -18,7 +18,7 @@ if str(ROOT / "src") not in sys.path:
 
 from larb.adapters.ffmpeg.locate import find_ffmpeg  # noqa: E402
 from larb.adapters.ffmpeg.processor import FfmpegProcessor  # noqa: E402
-from larb.core.errors import DownloadError, MediaUnavailableError  # noqa: E402
+from larb.core.errors import DownloadError, MediaUnavailableError, StoppedError  # noqa: E402
 from larb.core.models import MediaInfo, SheetRow  # noqa: E402
 from larb.core.pipeline import Pipeline  # noqa: E402
 from larb.core.ports import EventSink, MediaSource, SongListSource  # noqa: E402
@@ -49,9 +49,12 @@ class FakeMedia(MediaSource):
         lookup_delays: url -> seconds its look-up takes (to make parallel look-ups
             finish out of sheet order).
         lookup_fail_first: urls whose first look-up fails with a retryable error.
+        hang_until_cancel: urls whose download writes a partial file, then waits
+            for cancel() and raises StoppedError (like an interrupted download).
     """
 
-    def __init__(self, table, fail_first=(), always_fail=(), lookup_delays=None, lookup_fail_first=()):
+    def __init__(self, table, fail_first=(), always_fail=(), lookup_delays=None, lookup_fail_first=(),
+                 hang_until_cancel=()):
         self.table = table
         self.downloads = 0
         self.lookups = 0
@@ -62,10 +65,20 @@ class FakeMedia(MediaSource):
         self._always_fail = set(always_fail)
         self._lookup_delays = lookup_delays or {}
         self._lookup_fail_first = set(lookup_fail_first)
+        self._hang = set(hang_until_cancel)
+        self.cancelled = threading.Event()
+        self.download_started = threading.Event()   # set when any download begins
+        self.lookup_urls = []                       # every url looked up, in call order
+
+    def cancel(self):
+        self.cancelled.set()
 
     def lookup(self, url):
+        if self.cancelled.is_set():
+            raise StoppedError("Stopped")
         with self._lock:
             self.lookups += 1
+            self.lookup_urls.append(url)
             self._running_lookups += 1
             self.max_concurrent_lookups = max(self.max_concurrent_lookups, self._running_lookups)
             fail_now = url in self._lookup_fail_first
@@ -83,6 +96,14 @@ class FakeMedia(MediaSource):
                 self._running_lookups -= 1
 
     def download(self, url, kind, dest_dir, stem):
+        if self.cancelled.is_set():
+            raise StoppedError("Stopped")
+        self.download_started.set()
+        if url in self._hang:
+            (dest_dir / f"{stem}.webm.part").write_bytes(b"half a song")
+            if not self.cancelled.wait(10):   # never cancelled: fail differently, so a test notices
+                raise DownloadError(f"{url}: never cancelled", retryable=False)
+            raise StoppedError("Stopped")
         if url in self._always_fail:
             raise DownloadError("HTTP Error 403: Forbidden", retryable=True)
         if url in self._fail_first:

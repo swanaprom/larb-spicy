@@ -15,7 +15,7 @@ from pathlib import Path
 
 import yt_dlp
 
-from larb.core.errors import DownloadError, MediaUnavailableError
+from larb.core.errors import DownloadError, MediaUnavailableError, StoppedError
 from larb.core.models import Level, LogEvent, MediaInfo, MediaKind
 from larb.core.ports import EventSink, MediaSource
 
@@ -73,7 +73,23 @@ class YtDlpMediaSource(MediaSource):
         self._ffmpeg_dir = ffmpeg_dir
         self._events = events
         self._lock = threading.Lock()   # look-ups and downloads run in several threads
+        self._stop = threading.Event()  # set by cancel()
         self._remembered: dict[str, tuple[float, dict]] = {}   # url -> (when, raw info)
+
+    def cancel(self) -> None:
+        # Downloads notice it in their progress hook (several times a second while
+        # data arrives). A look-up can't be interrupted; it finishes first.
+        self._stop.set()
+
+    def _raise_if_stopped(self) -> None:
+        if self._stop.is_set():
+            raise StoppedError("Stopped")
+
+    def _stop_hook(self, _status: dict) -> None:
+        """yt-dlp calls this while downloading and around merging. DownloadCancelled is
+        yt-dlp's own "stop now" exception: it isn't wrapped or retried inside yt-dlp."""
+        if self._stop.is_set():
+            raise yt_dlp.utils.DownloadCancelled("Stopped")
 
     def _base_options(self) -> dict:
         return {
@@ -89,6 +105,7 @@ class YtDlpMediaSource(MediaSource):
         self._events.emit(LogEvent(level, "media", message))
 
     def lookup(self, url: str) -> MediaInfo:
+        self._raise_if_stopped()
         started = time.perf_counter()
         options = {**self._base_options(), "skip_download": True}
         try:
@@ -132,7 +149,9 @@ class YtDlpMediaSource(MediaSource):
         return info
 
     def download(self, url: str, kind: MediaKind, dest_dir: Path, stem: str) -> Path:
-        options = {**self._base_options(), "outtmpl": str(dest_dir / f"{stem}.%(ext)s")}
+        self._raise_if_stopped()
+        options = {**self._base_options(), "outtmpl": str(dest_dir / f"{stem}.%(ext)s"),
+                   "progress_hooks": [self._stop_hook], "postprocessor_hooks": [self._stop_hook]}
         if kind.audio_only:
             options["format"] = "ba/b"
         else:
@@ -146,7 +165,7 @@ class YtDlpMediaSource(MediaSource):
             try:
                 return self._download(url, options, lambda ydl: ydl.process_ie_result(info, download=True))
             except DownloadError as e:
-                if not e.retryable:
+                if not e.retryable or self._stop.is_set():
                     raise
                 # A retry with fresh info is what fixes YouTube's intermittent 403 (TECH §9).
                 self._log(Level.INFO, f"download of {info['id']} with the looked-up info failed "
@@ -158,7 +177,13 @@ class YtDlpMediaSource(MediaSource):
         try:
             with yt_dlp.YoutubeDL(options) as ydl:
                 info = fetch(ydl)
-        except yt_dlp.utils.DownloadError as e:
+        except Exception as e:
+            # Whatever yt-dlp raised after a stop (DownloadCancelled from our hook, or an
+            # error it caused), it's a stop. Leftover pieces are the caller's to remove.
+            if self._stop.is_set():
+                raise StoppedError("Stopped") from None
+            if not isinstance(e, yt_dlp.utils.DownloadError):
+                raise
             message = _clean(e)
             raise DownloadError(message, retryable=not _is_permanent(message)) from None
         try:

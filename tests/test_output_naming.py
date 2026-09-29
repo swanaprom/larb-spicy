@@ -56,6 +56,9 @@ class FakeProcessor(MediaProcessor):
     def describe(self):
         return "fake"
 
+    def cancel(self):
+        pass
+
 
 class OutputNamingTest(unittest.TestCase):
 
