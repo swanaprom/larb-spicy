@@ -584,7 +584,7 @@ Windows 11, i5-6400, home connection. Pythons installed side by side: 3.11.9, 3.
 
 **Folders.** `settings.resolve_folder`: empty = `workspace/<name>`; relative = from the project folder (fixes the SPEC §14 known issue: `workspace/output` no longer becomes `workspace/workspace/output`); absolute as is. `ensure_folder` creates it at run start, before any download, and names the folder if it can't (e.g. a file in the way, no permission). `folder_setting` gives what the GUI saves: `""` when the shown full path is the default folder, so `config.toml` survives moving the project folder (maintainer decision 2026-09-29). [found]
 
-**Crossfade.** Default 0.8 (`models.DEFAULT_CROSSFADE_S`, `config/example.toml`). An existing `config.toml` keeps its own value (loading only fills in missing keys). `settings.correct_crossfade` for the GUI field: not a number (blank, letters, `nan`) → 0.8; 0 or less → 0.1 (the 3-frame floor, maintainer decision 2026-09-29); over 10 (and `inf`) → 10; `1,5` is read as 1.5. Values between 0 and 0.1 are kept, as the file allows them. [found]
+**Crossfade.** Default 0.8 (`models.DEFAULT_CROSSFADE_S`, `config/example.toml`). An existing `config.toml` keeps its own value (loading only fills in missing keys). `settings.correct_crossfade` for the GUI field: not a number (blank, letters, `nan`) → 0.8; below 0.1, 0 and negatives included → 0.1 (the 3-frame floor; maintainer decision 2026-09-29, revised after Part A: at first only 0 or less was raised); over 10 (and `inf`) → 10; `1,5` is read as 1.5. `config.toml` validation is unchanged (any value above 0). [found]
 
 **Tests.** 109 (+34), ~90 s. Tests whose expected lengths assume 1 s crossfades now set `crossfade_duration_seconds=1.0` explicitly instead of relying on the default.
 
