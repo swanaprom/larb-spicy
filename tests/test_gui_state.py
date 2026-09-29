@@ -81,10 +81,11 @@ class RunRequestTest(unittest.TestCase):
 
     def test_file_only_settings_are_kept(self):
         loaded = Settings(output=OutputSettings(filename_template="{date}"))
-        settings = settings_from_fields(fields(output_dir=r"E:\renders"), loaded, PROJECT, WORKSPACE)
+        elsewhere = Path(PROJECT.anchor) / "renders"   # an absolute folder on any OS
+        settings = settings_from_fields(fields(output_dir=str(elsewhere)), loaded, PROJECT, WORKSPACE)
         self.assertEqual(settings.output.filename_template, "{date}")
         self.assertEqual(settings.download, loaded.download)
-        self.assertEqual(Path(settings.output.directory), Path(r"E:\renders"))
+        self.assertEqual(Path(settings.output.directory), elsewhere)
 
     def test_unchanged_fields_mean_no_unsaved_edits(self):
         loaded = Settings(processing=ProcessingSettings(audio_only=True, crossfade_duration_seconds=0.8))
