@@ -36,14 +36,16 @@ Running setup again later is safe and quick: it only rebuilds what's missing.
 
 **3. Run:**
 
-| Windows | Linux / Mac |
-| --- | --- |
-| `run.bat "<Google Sheet URL>"` | `./run.sh "<Google Sheet URL>"` |
+| | Windows | Linux / Mac |
+| --- | --- | --- |
+| The window | double-click `run.bat`, or run `run.bat` | `./run.sh` |
+| The terminal version | `run.bat "<Google Sheet URL>"` | `./run.sh "<Google Sheet URL>"` |
 
-On Windows you can also double-click `run.bat`: it asks for the sheet URL and keeps the window
-open at the end. Options: `--rows 2-40` (only those sheet rows), `--countdown <file or YouTube
-URL>`, `--verbose`. Settings are in `config/config.toml` (created on the first run from
-`config/example.toml`, which explains each setting). The output lands in `workspace/output/`.
+In the window, paste the sheet link and press **Run**. The terminal version takes options:
+`--rows 2-40` (only those sheet rows), `--countdown <file or YouTube URL>`, `--verbose`.
+Settings are in `config/config.toml` (created on the first run from `config/example.toml`,
+which explains each setting); the window saves its choices there when you press Run. The
+output lands in `workspace/output/` unless you choose another folder.
 
 The sheet must be shared as **"Anyone with the link"** (viewer is enough).
 

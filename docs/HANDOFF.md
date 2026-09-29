@@ -57,28 +57,37 @@ FFmpeg does **not** fail when a song's end time is past the real length of the v
 
 Every run writes `workspace/logs/<date>_<time>.log`. It has more than the console: the exact FFmpeg commands, ready to paste into a terminal. Only the 5 newest logs are kept, so copy one somewhere else if you need it later.
 
-## "Clear the download cache?"
+## Clearing the download cache
 
-Asked after every successful run. Enter means No. Yes deletes only the files named by the cache rule above (and leftovers of interrupted downloads), nothing else in that folder. Say No while you're still fixing the sheet: the next run won't need to download again.
+- **In the window:** the **Clear cache** button (bottom row, far from Run). It asks first, with how many files and how much space. Nothing is asked after a run; instead the last line of the log says how much the cache holds.
+- **In the terminal:** "Clear the download cache?" is asked after every successful run. Enter means No.
+
+Either way, only the files named by the cache rule above (and leftovers of interrupted downloads) are deleted, nothing else in that folder. Keep the cache while you're still fixing the sheet: the next run won't need to download again.
 
 **Where the cache lives:** leave `cache_directory` empty (it defaults to `workspace/cache/`). Change it only if that disk is nearly full, and then create a **new, empty folder used only by this program**. Never point it at an existing folder like Music or Downloads: clearing works by file-name pattern, so one of your own files that happens to match (e.g. `something_audio.mp3`) would be deleted.
 
 ## Running only part of the sheet
 
-Long list? Run it in sections: rows `2-40` today, `41-80` tomorrow (`--rows 2-40` on the command line, or the row fields in the GUI). Row numbers are the ones Google Sheets shows on the left; the header is row 1, so the first song is row 2. A single number (`--rows 5`) runs just that row, handy for re-checking one song. Each section is its own output file, and songs already downloaded stay cached between sections.
+Long list? Run it in sections: rows `2-40` today, `41-80` tomorrow (`--rows 2-40` on the command line, or the "from" / "to" fields in the window, where an empty field means "from the first song" or "to the last row": from `41` and an empty "to" runs row 41 to the end). Row numbers are the ones Google Sheets shows on the left; the header is row 1, so the first song is row 2. A single number (`--rows 5`) runs just that row, handy for re-checking one song. Each section is its own output file, and songs already downloaded stay cached between sections.
 
-## Running it from a terminal
+## Starting it: the window, or the terminal
 
 Use the scripts; they do the environment for you (README, "Quick Start"):
 
 ```
-run.bat "<sheet URL>" [--rows 2-40] [--countdown <file or URL>] [--verbose]      (Windows)
-./run.sh "<sheet URL>" [...]                                                     (Linux/Mac)
+run.bat                                                                          (Windows: the window)
+run.bat "<sheet URL>" [--rows 2-40] [--countdown <file or URL>] [--verbose]      (Windows: terminal)
+./run.sh                                                                         (Linux/Mac: the window)
+./run.sh "<sheet URL>" [...]                                                     (Linux/Mac: terminal)
 ```
+
+Without arguments (e.g. double-clicking `run.bat`) the window opens. On Windows the black
+console window starts **minimized** in the taskbar: if something goes wrong before the window
+appears, the message is there, and the console waits until you've read it.
 
 `run` checks `.venv` (rebuilds it by itself if it's missing or built with a Python outside the
 range), updates yt-dlp, puts `src` on the path, and starts `python -m larb` with your
-arguments. No need to activate the venv. For the tests: `.venv\Scripts\python.exe -m unittest`
+arguments (none = the window). No need to activate the venv. For the tests: `.venv\Scripts\python.exe -m unittest`
 (Linux/Mac: `.venv/bin/python -m unittest`), from the project folder.
 
 ## Setup problems?
@@ -94,6 +103,11 @@ arguments. No need to activate the venv. For the tests: `.venv\Scripts\python.ex
   terminal/VS Code where it is activated. Close it and run again.
 - **Something weird with the venv?** Delete the `.venv` folder and run `setup_once` again. The
   venv is disposable: rebuild, never repair. (It re-downloads FFmpeg, ~200 MB.)
+- **Linux: song titles show as boxes in the window.** No font for Thai, Korean or Japanese
+  (seen on WSL Ubuntu 26.04, which has none). Setup warns about it and prints the command:
+  `sudo apt install fonts-thai-tlwg fonts-noto-cjk` (Fedora: `sudo dnf install
+  google-noto-sans-thai-fonts google-noto-sans-cjk-fonts`). Then restart the window. Windows
+  and Mac already have these fonts.
 - **FFmpeg.** Setup downloads it into `.venv` (static-ffmpeg). If that fails, a system FFmpeg
   7.1 or newer is used; otherwise setup offers to install one. A run never downloads FFmpeg.
 
@@ -109,6 +123,14 @@ be updated even though the internet works, or setup can't install it, this is th
 4. Run the tests. Pass → commit and tag a new CalVer release; only then uninstall the old
    Python. Fail → usually a pinned library needs bumping; hand the error to an AI.
 
+## Stopping a run
+
+In the window, Run turns into **Stop** during a run (it asks first). Stopping can take a few
+seconds: a YouTube look-up that has already started is allowed to finish, while downloads and
+rendering stop at once. Songs already downloaded stay in the cache; half-finished downloads are
+deleted; nothing unfinished gets the normal output name (anything already written becomes
+`..._FAILED`). Closing the window during a run offers the same stop, then closes.
+
 ## Countdown from YouTube
 
 The countdown can be a YouTube link (`--countdown <URL>`, or `countdown.default_urls` in `config.toml`). It's downloaded and cached like a song. In `config.toml`, put the link in quotes: `default_urls = ["https://www.youtube.com/watch?v=..."]`. Without quotes the file doesn't load.
@@ -116,7 +138,9 @@ The countdown can be a YouTube link (`--countdown <URL>`, or `countdown.default_
 ## What are recommended upgrades?
 
 - Expose some configs in TOML as 'Advanced Settings' into GUI, currently hide by design to keep it direct and minimal.
-- Final output length predictor before processing.
+- **Est. Length:** show the planned output length before running. The button is already in the window, disabled ("Coming later"). The core already calculates the length when it plans the render; the work is to get it earlier: an **estimate** is possible right after the YouTube look-ups (YouTube's lengths are rounded to whole seconds), and it's **exact** only after the downloads, when the real files have been measured.
+- **Remember the last inputs** (sheet link, countdown) between sessions, in their own small memory file, separate from `config.toml` (which holds settings, not what one run used).
+- **The accent colours as a file-only config**, so a future generation can restyle the window without touching code. Today they are the constants at the top of `src/larb/gui/theme.py`.
 - Remember each video's length between runs. Today every run looks up every row on YouTube again, even when the video is already downloaded. Saving the lengths (e.g. next to the cache) would let reruns of a long list skip most look-ups, which is what gets a connection limited ("Sign in to confirm you're not a bot", HTTP 429).
 - Support YouTube cookies (yt-dlp's `--cookies-from-browser`), the usual cure for the bot check. Trade-off: the program then uses a logged-in account's session. Downloads count against that account, and a heavy run could get the account itself limited or flagged, so it should be a throwaway account, never someone's personal one. Not supported for now (maintainer decision 2026-09-28); until then, wait and retry.
 - Notification: Error/Success have different noise. and also the notification thing that make icon in taskbar blink orange.

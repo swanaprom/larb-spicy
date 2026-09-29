@@ -255,6 +255,9 @@ Newest first. Date · what was tried · result · where it's now documented.
 
 | Date | Finding | Result | Documented in |
 | ---- | ------- | ------ | ------------- |
+| 2026-09-29 | Window live: audio, video, private and mismatch sheets, stop while downloading / rendering, close during a run | all as GUI.md; stop ends 1.8 s / 3.3 s after the confirmation | §19 |
+| 2026-09-29 | Thai / Korean / Japanese in Tk: Windows 11 and WSL Ubuntu 26.04 | Windows fine; WSL has no fonts (boxes) until fonts-thai-tlwg + fonts-noto-cjk | §19 |
+| 2026-09-29 | Screenshots of the window: CopyFromScreen vs PrintWindow | CopyFromScreen can capture whatever covers the window; PrintWindow only the window, Tk loop must keep running | §19 |
 | 2026-09-29 | Stopping FFmpeg with "q" on stdin, MP3 and 720p H.264, 3 runs each | exits 0.11–0.17 s / 0.42–0.47 s after the stop; partial files stay readable | §18 |
 | 2026-09-29 | Cancelling a real yt-dlp download from its progress hook | `StoppedError` 1.0 s after cancel; only a `.part` left, removed by the core | §18 |
 | 2026-09-28 | Video in 12-segment chunks + one-pass audio, 3 / 6 / 71 songs | same frame count as one pass; 6-song chunk 0.83 GB; 3-song render +2.6 % vs slice 2 with the audio pass in parallel (+17.5 % without) | §16 |
@@ -589,3 +592,47 @@ Windows 11, i5-6400, home connection. Pythons installed side by side: 3.11.9, 3.
 **Tests.** 109 (+34), ~90 s. Tests whose expected lengths assume 1 s crossfades now set `crossfade_duration_seconds=1.0` explicitly instead of relying on the default.
 
 **Live, no regression:** `python -m larb <live sheet>` (audio, all cached): 140.02 s = planned, with the operator's `config.toml` at 0.8; `config.toml` unchanged by the run. [found 2026-09-29]
+
+## 19. Slice 5, Part B — the window (2026-09-29, branch `slice-5-gui`)
+
+Windows 11, 1920×1080 at 100 % scaling, Tk 8.6 (Python 3.12 venv). WSL: Ubuntu 26.04, Python 3.13, Tk 8.6, WSLg.
+
+**Layout.** `src/larb/gui/`: `state.py` (every decision, no Tkinter: what's enabled, the progress label, counts, filter, active downloads, fields → run; tested offline), `runner.py` (worker thread + queue), `window.py` (widgets only), `widgets.py`, `theme.py`. `python -m larb` without arguments opens it; with arguments the CLI runs as before.
+
+**Recipes and quirks** [found]:
+- **Coloured buttons are `tk.Label`s** with click/hover bindings (`widgets.ColorButton`): `tk.Button` ignores `bg` on Mac, and ttk buttons can't be coloured per button with Windows' native theme. ttk widgets use the `clam` theme, which accepts colours on every OS; the NEON radio dot is `indicatorcolor` mapped on `selected`.
+- ⚠ **Never name an attribute `_w` on a Tk widget subclass**: it's Tkinter's internal widget path. `SweepBar` did, and every canvas call failed with `invalid command name "180"`.
+- **Log filter = Text-tag `elide`**: each line is tagged `level_<LEVEL>`; the filter hides tags instead of rebuilding the text, so a 300-song log filters instantly.
+- ⚠ **Auto-follow must be decided once per batch.** Checking `yview()` before each inserted line reads a stale value after the first insert (Tk recomputes it only when it redraws), so a burst of lines stopped the following. Now `_poll` checks once, inserts the batch, then scrolls.
+- ⚠ **Don't touch widgets after `root.destroy()` in the same callback**: closing during a run destroys the window from `_poll`; its final scroll then hit a dead widget.
+- **Dialogs** are one modal `Toplevel` (`widgets.ask`), dark like the window, with the exact buttons GUI.md names; the default is focused (Enter); Escape and the window's close button give a separate "escape" answer (Cancel for "Save your changes?"). `messagebox` can't label its buttons.
+- **Stopped label**: a long reason (a missing column lists every header found) takes the bar's place and wraps; a fixed width cut it off.
+- **Windows title bar** stays in the system's accent colour on this PC: `DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)` is set, but Windows ignores it when "Show accent colour on title bars" is on. Left alone (it's the operator's system setting); overriding it would need `DWMWA_CAPTION_COLOR` (Windows 11 only).
+- **DPI**: `SetProcessDpiAwareness(1)` before `Tk()`, so text stays sharp at 125/150 % (not tested at other scalings: this PC is 100 %).
+- **Minimum size** = the requested size after layout (637×755 here); a smaller geometry is refused; extra height goes only to the log panel. Room for `max_parallel_downloads` download lines is reserved, so the log doesn't jump when they appear.
+
+**`run.bat` without arguments** restarts itself with `start "Random Dance combiner (console)" /min cmd /c call "%~f0"` (guard: `LARB_MINIMIZED`), then `env_setup.py run` → `python -m larb`. The console closes after a normal exit and pauses after a failure. ⚠ Give the console a **different title** from the window: with the same title the taskbar shows two identical entries (and a test closed the wrong one). ⚠ Git Bash's `sed -i` rewrote `run.bat` with LF line endings; edit `.bat` files with something that keeps CRLF (`.gitattributes` fixes the committed copy, not the working file). Measured: window visible **8 s** after starting (includes the yt-dlp update check); closing the window left no process behind. [found]
+
+**Fonts.** Windows 11: Thai, Korean and Japanese all render through Tk's font fallback from Segoe UI (no font list needed). **WSL Ubuntu 26.04 has no font for any of the three** (`fc-list :lang=th` empty): they showed as boxes. Tested without changing the system: `apt download fonts-noto-cjk fonts-tlwg-loma-otf fonts-tlwg-garuda-otf`, unpacked under `/tmp`, used by one process through `FONTCONFIG_FILE` → all three render (then removed). `fonts-thai-tlwg` is a metapackage (its `fonts-tlwg-*` dependencies pull the real `-otf` fonts), so the operator command is `sudo apt install fonts-thai-tlwg fonts-noto-cjk` (fonts-noto-cjk is a ~61 MB download). `setup_once` now warns and prints it (`env_setup.check_fonts`). The Fedora package names (`google-noto-sans-thai-fonts google-noto-sans-cjk-fonts`) are not tested. [found 2026-09-29]
+
+**Live runs from the window** (live sheet, 3 songs; scripted through the real `Window` with a copy of the settings, so `config/config.toml` was never written): [found 2026-09-29]
+
+| Run | Result |
+| --- | --- |
+| Audio, all cached | label Starting → Reading the sheet → Preparing the countdown → Checking n / 3 → Rendering → **Finished**; 140.02 s = planned; cache reminder last in the log; Open file / Open folder enabled |
+| Video, 3 new downloads | countdown and song download lines with timers and the sweep; downloads 67 s, render 38 s; Finished |
+| Private sheet | pop-up "The sheet can't be read (HTTP 401) …", RED "Stopped: …", window unlocked |
+| Header-mismatch sheet | pop-up naming `ศิลปิน` and the headers found; the RED label wraps |
+| Stop while downloading (video, empty cache) | confirmation with Keep running as default; run ended **1.8 s** after Stop; cache: only the finished countdown; no `.part`; no output; unlocked |
+| Stop while rendering (video, cached) | ended **3.3 s** after Stop; no `.rendering`, no `_FAILED` (a video writes the output file only in its final join), tmp empty |
+| Close during a run → Stop and close | window closed ~2 s later, once the run had ended; log shows "Stopped by the operator" |
+| Crossfade field | `abc`, blank, spaces → 0.8; `0`, `-3`, `0.05` → 0.1; `15` → 10; also on leaving the field |
+| Close with unsaved edits | Cancel keeps the window; Save writes them (`audio_only`, crossfade 1.5) |
+| Save to `C:\Windows\System32\…` | refused before saving or running: "Can't create the output folder … Access is denied"; the log stayed empty |
+| Save to a missing folder | created; output there; saved as its full path (the default folder is saved as `""`) |
+
+**Screenshots for checking: capture only the program's window.** ⚠ The first harness used `CopyFromScreen` on the window's rectangle; when another window was brought to the front, it captured that instead (deleted). Use `PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT)` with the Tk frame's handle (`int(root.wm_frame(), 16)`): only that window's pixels, even when covered. ⚠ `PrintWindow` asks the window's own thread to paint, so the Tk loop must keep running meanwhile (start PowerShell with `Popen` and call `root.update()` until it ends), or both wait forever. WSLg windows are `msrdc.exe` windows titled `… (Ubuntu)`; `PrintWindow` works on them too.
+
+**Not done / not tested:** Mac (only the mirrored row, forced with the developer switch `LARB_GUI_MAC=1`); scalings other than 100 %; a real click on Open file / Open folder (called with the right paths; the system call itself not exercised); keyboard-only use beyond Enter / Escape in dialogs; a full run from the window in WSL (opened and displayed only).
+
+**Tests.** 135 (+26), ~90 s: `tests/test_gui_state.py` (controls per phase, fields → run, the progress label through every stage and both endings, filter and counts, active download lines by key, texts, bottom-row order, the worker with a fake pipeline: stop reaching it, stop before it exists, an unexpected error still ending the run). Tkinter widgets themselves are not unit-tested.
