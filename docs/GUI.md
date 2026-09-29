@@ -1,6 +1,6 @@
 # GUI.md — Operator Window
 
-**Status:** agreed design, ready to build (maintainer decisions 2026-09-29). Owned by the maintainer, like SPEC.md. SPEC wins on conflict.
+**Status:** built in slice 5 (release 2026.2). This file describes the window as it is; change it here first, then in code. Owned by the maintainer, like SPEC.md. SPEC wins on conflict.
 
 **Design goal:** minimal, but it guides the eye. The operator should always know three things at a glance: _what will happen_ (top), _what is happening_ (middle), and _what to press_ (bottom).
 
@@ -13,38 +13,41 @@
 - All text must display Thai correctly, on Windows and Linux.
 - Paths are shown and stored as **full paths**, so the relative-path mistake in SPEC §14 can't happen from the GUI.
 
-**Window:** a fixed **minimum** size; below it, nothing shrinks further. Above it, only the log panel grows. **Fixed dark theme** (plain Tkinter doesn't follow the system's light/dark switch without extra work, so one look is kept on purpose).
+**Window:** titled **"LARB - Spicy"**. A fixed **minimum** size; below it, nothing shrinks further. Extra height goes only to the log panel; extra width also widens the text fields. **Fixed dark theme** (plain Tkinter doesn't follow the system's light/dark switch without extra work, so one look is kept on purpose).
 
-**Button order:** Windows and Linux put Run on the left; Mac mirrors the bottom row.
+**Button order:** Windows and Linux put Run on the left; Mac mirrors the bottom row. (Developer switch `LARB_GUI_MAC=1` forces the Mac row, to check it without a Mac.)
+
+**Icons and title bar:** the program has its own Windows identity, so the taskbar shows its icon, not Python's. Two icons in `src/larb/gui/assets/`: `icon_titlebar.ico` (white) is the small icon in the title bar; `icon_taskbar.ico` (accent) is the large icon in the taskbar and Alt+Tab. Linux uses `icon.png`. On Windows 11 the title bar is DARK with white text, overriding the system's accent colour for this window; older Windows keeps its own title bar.
+
+**Keyboard shortcuts:** Ctrl+C / V / X / A work in text fields with **any keyboard language** (e.g. Thai), because they're recognised by the physical key, not the typed character. Ctrl+A selects all, on Linux too. There's no undo (Ctrl+Z) in text fields; Tkinter doesn't provide one, and these short fields don't need it.
 
 ## Colours
 
 A standard dark theme (greys) for everything not listed here: backgrounds, text fields, Browse, Open file, Open folder.
 
-| Name   | Hex       | Used for                                                                                                        |
-| ------ | --------- | --------------------------------------------------------------------------------------------------------------- |
-| DARK   | `#8B0088` | Log filter "All" when not active; one end of the download sweep                                                 |
-| LIGHT  | `#FF80FF` | Background of Est. Length and Clear cache (black text)                                                          |
-| NEON   | `#FF00FF` | Run button; overall progress bar; filter "All" when active; selected radio dot; other end of the download sweep |
-| ORANGE | `#FF8800` | Filter "Warnings" when active; WARNING lines in the log                                                         |
-| RED    | `#FF1900` | Filter "Errors" when active; Stop button; ERROR lines in the log; "Stopped: …" label                            |
+|Name|Hex|Used for|
+|---|---|---|
+|DARK|`#8B0088`|Log filter "All" when not active; one end of the download sweep|
+|LIGHT|`#FF80FF`|Background of Est. Length and Clear cache (black text)|
+|NEON|`#FF00FF`|Run button; overall progress bar; filter "All" when active; selected radio dot; other end of the download sweep|
+|ORANGE|`#FF8800`|Filter "Warnings" when active; WARNING lines in the log|
+|RED|`#FF1900`|Filter "Errors" when active; Stop button; ERROR lines in the log; "Stopped: …" label|
 
 Rules:
 
 - **Filter buttons:** active = their colour (All: NEON, Warnings: ORANGE, Errors: RED). Not active = a darker version of the same colour (All uses DARK; Warnings and Errors are ORANGE and RED moved toward black). Text is always white.
 - **Hover:** every coloured button gets a slightly darker version of its idle colour.
 - **Run** is NEON with white text; **Stop** is RED with white text.
-- **Radio buttons:** the selected dot is NEON, if Tkinter allows it; otherwise the theme's default.
+- **Radio buttons:** the selected dot is NEON. The circle is white when the choice is usable, dark grey when it's greyed out.
 
 ---
 
 ## Layer 1 — Sketch
 
-Windows and Linux layout. On Mac, the bottom row is mirrored.
+Windows and Linux layout. On Mac, the bottom row is mirrored. The panes have no titles on screen; the pane names in this file are only for talking about the design.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ 1. WHAT TO MAKE                                                      │
 │   Sheet     [ Google Sheet link / Path to CSV file          ] [Browse]│
 │   Rows      from [    ] to [    ]                                    │
 │   Output    (•) Video  ( ) Audio      Mirror  ( ) Everything (•) Ignore│
@@ -52,7 +55,6 @@ Windows and Linux layout. On Mac, the bottom row is mirrored.
 │   Crossfade [ 0.8 ] s                                                │
 │   Save to   [ D:\larb-spicy\workspace\output                ] [Browse]│
 ├──────────────────────────────────────────────────────────────────────┤
-│ 2. WHAT'S HAPPENING                                                  │
 │   [All] [Warnings (1)] [Errors (0)]                                  │
 │   ┌──────────────────────────────────────────────────────────────┐   │
 │   │ 23:10:28 INFO     row 2: ok: Perfect Night (27-64 s)         │   │
@@ -65,7 +67,7 @@ Windows and Linux layout. On Mac, the bottom row is mirrored.
 │     Ditto                         [   ▓██▓▒░       ]  0:05           │
 │                                             [Open file] [Open folder]│
 ├──────────────────────────────────────────────────────────────────────┤
-│ 3. [    RUN    ]                         [Est. Length] [Clear cache] │
+│   [    RUN    ]                          [Est. Length] [Clear cache] │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -142,10 +144,10 @@ Card fields: **Kind** · **Maps to** (config key, or run input = not saved) · *
 
 - **Kind:** small number field, seconds.
 - **Maps to:** `processing.crossfade_duration_seconds`.
-- **Default:** **0.8 s** (changed from 1.0; see "Needs a SPEC update").
+- **Default:** **0.8 s**.
 - **Checked when:** on leaving the field:
     - Not a number (e.g. "abc", empty) → restored to the default, 0.8.
-    - A number outside above-0-to-10 → corrected by the core; the field shows the corrected value.
+    - Below 0.1 (including 0 and negatives) → 0.1. Over 10 → 10. The field shows the corrected value.
 - **During a run:** locked.
 - **Why here:** rarely changed, so it's low in the pane.
 
@@ -160,7 +162,7 @@ Card fields: **Kind** · **Maps to** (config key, or run input = not saved) · *
 
 ### 2.1 Log filter
 
-- **Kind:** three small toggle buttons at the log's top left: "All" / "Warnings (n)" / "Errors (n)", with live counts. "Warnings" shows warnings and errors.
+- **Kind:** three small toggle buttons at the log's top left: "All" / "Warnings (n)" / "Errors (n)", with live counts. "Warnings" shows warnings and errors. The warning count includes the end-of-run cache reminder and the "stopped by the operator" line.
 - **Maps to:** display only.
 - **Default:** All.
 - **During a run:** usable; filtering never pauses or changes the run.
@@ -183,8 +185,8 @@ Card fields: **Kind** · **Maps to** (config key, or run input = not saved) · *
 ### 2.3 Progress
 
 - **Kind:** two parts, shown only while a run is going:
-    - **Overall bar:** stage name + "done / total", and the label follows the run from stage to stage, e.g. "Checking 12 / 40" → "Downloading 12 / 40" → "Rendering part 3 / 7". Real progress. When the run ends, the same label shows how it ended: "Finished", or in RED, "Stopped: <reason>". This replaces a separate result line.
-    - **Active downloads:** one row per download in progress (up to `max_parallel_downloads`, e.g. 3): song title, a sweeping "busy" animation (Tkinter's indeterminate progress bar), and how long it has been downloading (e.g. `0:42`). When a song finishes, its row disappears and the next song takes its place.
+    - **Overall bar:** stage name + "done / total", and the label follows the run from stage to stage: "Starting" → "Reading the sheet" → "Preparing the countdown" → "Checking 12 / 40" → "Downloading 12 / 40" → "Measuring 12 / 40" → "Rendering part 3 / 7" (audio: just "Rendering", since it's one pass). Real progress. When the run ends, the same label shows how it ended: "Finished", "Stopping..." then "Stopped: you pressed Stop", or in RED, "Stopped: <reason>" (long reasons wrap). This replaces a separate result line.
+    - **Active downloads:** one row per download in progress (up to `max_parallel_downloads`, e.g. 3): song title, a sweeping "busy" animation (a drawn gradient bar, since Tkinter's own indeterminate bar can't show a gradient), and how long it has been downloading (e.g. `0:42`). When a song finishes, its row disappears and the next song takes its place.
 - **Maps to:** overall bar: the core's `LogEvent.progress`. Active downloads: the core's "download started" / "download finished" events for each row, as **structured data, never parsed from log text**. Not shown in the log panel, so the filter stays clean.
 - **Why the timer:** the animation only shows the program is alive; the timer shows a stuck download (normal songs finish in well under a minute).
 - **Colours:** overall bar: NEON on the theme's bar background. Active downloads: a sweeping gradient between DARK and NEON on the theme's bar background.
@@ -216,24 +218,26 @@ Card fields: **Kind** · **Maps to** (config key, or run input = not saved) · *
 
 - **Kind:** LIGHT background, black text, at the far end of the bottom row (right on Windows and Linux, left on Mac).
 - **Maps to:** the core's cache clearing (§10: only cache-named files).
-- **Checked when:** on click: a confirmation, "Delete N downloaded files (X MB)? [Delete] [Cancel]", with Cancel as the default.
+- **Checked when:** on click: a confirmation, "Delete N downloaded files (X MB)? [Delete] [Cancel]", with Cancel as the default. An empty cache just says "The cache is empty".
 - **During a run:** disabled.
 - **Why here:** far from Run, so it's never pressed by accident.
-- **After each run:** no question is asked. Instead, a WARNING line at the end of the log reminds the operator: "The cache holds N files (X GB). Use Clear cache when you're done." (See "Needs a SPEC update".)
+- **After each run:** no question is asked. Instead, a WARNING line at the end of the log reminds the operator: "The cache holds N files (X GB). Use Clear cache when you're done."
 
 ---
 
 ## Dialogs
 
-- **Aborted runs** (private sheet, missing header, bad row range, no countdown, output folder can't be created): a **blocking pop-up** with the core's message. The main window can't be used until it's closed. The progress label also shows "Stopped: <reason>".
+- **Aborted runs** (private sheet, missing header, bad row range, no countdown, output folder can't be created, or any unexpected error): a **blocking pop-up** with the core's message. An operator's own Stop shows no pop-up. The main window can't be used until it's closed. The progress label also shows "Stopped: <reason>".
 - **Closing with unsaved edits:** ask "Save your changes?" [Save] [Don't save] [Cancel].
 - **Closing during a run:** ask "A run is in progress. Stop it and close?" [Stop and close] [Keep running], with Keep running as the default.
 
 ---
 
-## For Claude Code to propose (may touch ports)
+## How it's built
 
-1. **Stopping a run:** the core needs a way to cancel downloads and an FFmpeg render cleanly. This probably touches the `MediaSource` / `MediaProcessor` ports.
-2. **"Download started / finished" as structured data** for the active-download rows (2.3), e.g. a small marker on `LogEvent`, so the GUI never reads log text.
-3. **Open-ended row ranges:** the core must accept a missing first or last row.
-4. **How the GUI talks to the core:** the core runs on a background thread; the GUI only updates widgets from its own thread (TECH §6).
+Built in slice 5; details and quirks in TECH.md §18–19.
+
+- The window never calls yt-dlp or FFmpeg; `src/larb/app.py` builds the pipeline for both the window and the terminal version.
+- The run happens on a background thread; only the window's own thread touches widgets.
+- Stop uses the ports' `cancel()` methods; active-download rows come from structured "started / ended" events, never from log text.
+- Every decision the window makes (what's enabled, what the progress label says, field corrections) lives in `src/larb/gui/state.py`, so it's tested without opening a window.

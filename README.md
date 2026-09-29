@@ -19,7 +19,7 @@ anything outside it.
 **1. Clone** the repository (any folder, spaces in the path are fine):
 
 ```
-git clone <this repository's URL>
+git clone https://github.com/swanaprom/larb-spicy.git
 cd larb-spicy
 ```
 

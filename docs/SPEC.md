@@ -65,10 +65,10 @@ Core (standard library only: rules, orchestration, decisions)
   SongListSource    rows of the song list                     Google Sheet CSV export / local CSV
   MediaSource       look up a video's info · download it      yt-dlp
   MediaProcessor    measure a clip · render the compilation   FFmpeg (the one FFmpeg helper lives here)
-  EventSink         report progress, warnings, errors         console now, GUI later
+  EventSink         report progress, warnings, errors         console, log file, GUI window
 ```
 
-Adapters can be replaced without touching the core, as long as the port stays the same. Port signatures change only with the maintainer's approval (CLAUDE.md).
+Adapters are connected to ports in exactly one place, `src/larb/app.py`, used by both the terminal version and the GUI. Adapters can be replaced without touching the core, as long as the port stays the same. Port signatures change only with the maintainer's approval (CLAUDE.md).
 
 **Module boundary rule (maintainability keystone):** the GUI never touches yt-dlp/FFmpeg directly, and the core never imports GUI code. If you can't unit-test a core module without spinning up the GUI, the boundary has leaked.
 
@@ -201,7 +201,7 @@ Turn your numbered usage scenario into a state machine / stage list with **input
 |7. Render|countdown + songs in sequence, settings|final output file|Trim with padding, mirror (per §8 Mirror rule), peak normalization (always on), crossfades and countdowns. Every segment is forced to exactly its planned length (audio padded with silence or cut, video by repeating the last frame), so small gaps in real files never add up. Audio in one FFmpeg run; video in chunks of 6 songs (§6).<br>**Only a checked output gets its final name:** the render writes `<name>.rendering.<ext>`; after the output length matches the plan it's renamed to the final name, otherwise to `<name>_FAILED.<ext>`, including when FFmpeg fails after writing something. Leftover `*.rendering.mp3` / `*.rendering.mp4` files from a crash are deleted at the start of the next run (only that exact pattern; a locked one is skipped with a warning). Protocol: if a specific song is known bad, warn and skip it; don't kill the whole compilation. **End fade-out:** the last song fades to silence and to black over the crossfade duration, ending exactly at the end of the output, which keeps its planned length. Hard-coded, no setting. The core decides the fade (it's part of the render plan); the renderer applies it, with a curved audio fade so the very end is fully silent|
 |8. Unlock GUI|run end|settings in the GUI editable again|—|
 
-**Stopped by the operator:** in the GUI, the Run button becomes Stop during a run, and stopping asks for confirmation first. A stopped run ends like any failed one: nothing unverified gets the final output name (anything already rendered becomes `_FAILED`), songs already downloaded stay cached, and interrupted downloads are cleaned up. Then the GUI unlocks.
+**Stopped by the operator:** in the GUI, the Run button becomes Stop during a run, and stopping asks for confirmation first. A stopped run ends like any failed one: nothing unverified gets the final output name (anything already rendered becomes `_FAILED`; a stopped _video_ render usually leaves nothing, since its output file only exists after the final join), songs already downloaded stay cached (a download that's already merging is allowed to finish), and interrupted downloads are cleaned up. A YouTube look-up already in progress finishes first, so a stop can take a couple of seconds: a clean result matters more than a fast stop. Then the GUI unlocks. Measured 2026-09: a live run ends within about 2–4 s of Stop.
 
 ## 10. Caching Strategy
 
@@ -257,7 +257,6 @@ Running list — append here instead of losing the thought between sessions.
 - YouTube reports song length rounded to whole seconds, so the early check (§8) can't catch every overrun; the after-download check (§9 stage 6) stays as the second guard.
 - Sheet column mapping is file-only for now (§7). A future generation can expose it in the GUI if the sheet layout changes often.
 - YouTube may rate-limit a connection after heavy use ("Sign in to confirm you're not a bot", then HTTP 429). It clears on its own after an hour or more; HANDOFF tells the operator to wait and retry. Using browser cookies would avoid it, but borrows a logged-in account's session, so it's deliberately not supported for now (maintainer decision 2026-09-28; see HANDOFF upgrades).
-- Relative folder paths in `config.toml` are read as starting inside `workspace/`, so writing `workspace/...` doubles the folder name. Intended rule: relative to the project folder. The GUI avoids it by always showing and storing full paths.
 - Every run re-checks every row on YouTube, even when all songs are cached. Remembering video lengths between runs is a recommended upgrade (HANDOFF).
 
 ## 15. Repository & Version Control
@@ -289,7 +288,10 @@ larb-spicy/
 ├── config/config.toml    # live settings, gitignored
 ├── src/larb/core/        # rules + orchestration, ports, models, errors (stdlib only)
 ├── src/larb/adapters/    # TOML, sheet, yt-dlp, FFmpeg, console
-├── src/larb/cli.py       # entry point: python -m larb <sheet> [--countdown <file or URL>] [--rows first-last]
+├── src/larb/app.py       # the one place adapters are connected to ports
+├── src/larb/cli.py       # terminal front end: python -m larb <sheet> [--countdown <file or URL>] [--rows first-last];
+│                         #   with no arguments, python -m larb opens the window
+├── src/larb/gui/         # the window (docs/GUI.md); its decisions live in gui/state.py, testable without Tkinter
 ├── tests/                # offline tests
 ├── tests/fixtures/       # tiny clips for the tests
 └── workspace/            # gitignored
@@ -328,7 +330,7 @@ Supported range: `python-range.txt`. Every version in it has passed the full tes
 2. Build the venv with that Python.
 3. Install pinned libraries + latest yt-dlp.
 4. Get FFmpeg: trigger the `static-ffmpeg` download now (about 45 s and 200 MB the first time), so the first real run doesn't stall. If that fails → use system FFmpeg if it's 7.1 or newer → else ask whether to install it (`winget` on Windows, `brew` on Mac; on Linux, print the command, with a warning that the distro's FFmpeg may be older than 7.1). After installing, tell the user to reopen the terminal and run setup again.
-5. On Linux, check that tkinter is available (the GUI needs it) and print the install command if not.
+5. On Linux, check that tkinter is available (the GUI needs it), and that fonts for Thai, Korean and Japanese are installed (song titles use them); print the install command for anything missing. Windows ships all of these.
 6. Always pause at the end, so a double-clicked window stays readable.
 
 Running `setup_once` again is safe and fast (seconds): nothing is rebuilt unless something is missing or out of range. Measured 2026-09: first setup about 3 minutes on Windows and on Linux.
@@ -338,7 +340,7 @@ Running `setup_once` again is safe and fast (seconds): nothing is rebuilt unless
 1. Venv missing, or its Python outside the range → rebuild it automatically, **announcing it first** (it includes the one-time FFmpeg download, so it can take minutes). If `requirements.txt` changed since the last install (e.g. after a `git pull`), reinstall the libraries.
 2. `pip install -U yt-dlp` (not `yt-dlp -U`, which is for the standalone binary). No internet → warn and continue with the installed version.
 3. Log the yt-dlp version (first suspect when downloads break), then start the program with UTF-8 output, so Thai titles print correctly.
-4. Started with no arguments (e.g. double-clicked) → ask for the sheet URL, and keep the window open at the end so the result can be read.
+4. Started with no arguments (e.g. double-clicked) → **open the window**. On Windows the console restarts minimized, titled "LARB - Spicy (console)": out of sight, but still in the taskbar if something fails before the window opens. It closes after a normal exit and stays open after a failure, so the error can be read. With arguments → the terminal version, as before.
 
 The program itself never downloads FFmpeg: a run uses static-ffmpeg only if it's already downloaded, otherwise the system FFmpeg.
 

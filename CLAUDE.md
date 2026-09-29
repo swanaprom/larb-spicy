@@ -4,45 +4,7 @@ Random Dance combiner: reads a song list from a Google Sheet, downloads the YouT
 
 ## Current phase
 
-**SLICE 5 — GUI**, branch `slice-5-gui`. The design is in `docs/GUI.md`; it's the source of truth for layout, behaviour and colours. SPEC wins over it on conflict.
-
-This slice has **two parts with a checkpoint between them**.
-
-### Part A — what the core needs first (then stop and report)
-
-1. **Propose before building** anything that touches a port (see GUI.md "For Claude Code to propose"). Stop until approved:
-   - **Stopping a run:** a clean way for the core to cancel look-ups, downloads and an FFmpeg render.
-   - **"Download started / finished" as structured data** for the active-download rows, never parsed from log text.
-   - **How the GUI talks to the core:** the core runs on a background thread; the GUI only touches widgets from its own thread (TECH §6).
-2. After approval, build and test offline:
-   - Stop, with the outcome in SPEC §9 ("Stopped by the operator").
-   - The started/finished markers.
-   - **Open-ended row ranges** (SPEC §8: an empty "from" or "to" is an open edge). The command line keeps `first-last`.
-   - **Relative folder paths** in `config.toml` are read relative to the **project folder**, not `workspace/` (SPEC §14 known issue).
-   - The crossfade default becomes **0.8** in `config/example.toml` (SPEC §7).
-3. **Stop and report.** The maintainer checks Part A before the window is built.
-
-### Part B — the window
-
-4. Build the window exactly as `docs/GUI.md` describes: layout, element cards, dialogs, colours, minimum size, dark theme, and Thai text displaying correctly.
-5. **Keep the GUI's logic testable:** decisions like "what's enabled now", "what the progress label says" and "is this crossfade input valid" live in plain Python, separate from the Tkinter widgets, so they can be tested offline.
-6. **Starting it:** `run.bat` / `run.sh` with **no arguments opens the GUI**. With arguments they run the terminal version as today. (This changes SPEC §16; list it under spec mismatches.)
-7. **HANDOFF, recommended upgrades:** add these three:
-   - Remember the last inputs (sheet link, countdown) between sessions, in their own small memory, separate from `config.toml`.
-   - Est. Length: show the planned output length before running. The core already calculates it, and the button already exists, disabled.
-   - The accent colours as a file-only config, so a future generation can restyle the window without touching code.
-
-Acceptance:
-
-1. **Part A:** offline tests for stopping (during look-ups, downloads and rendering), the markers, open-ended ranges and relative paths. All existing tests still pass.
-2. **Live runs from the GUI** on the sheet, video and audio. The progress label moves through its stages, active downloads show with timers, log colours and filter counts match GUI.md, and Open file / Open folder work afterwards.
-3. **Stop:** a live run stopped during downloading and one during rendering. There's a confirmation first; the outcome matches SPEC §9; the window unlocks.
-4. **Aborted runs:** the private sheet and the header-mismatch sheet (URLs in `CLAUDE.local.md`) each give the blocking pop-up and a RED "Stopped: …" label.
-5. **Settings behaviour:** a non-number in Crossfade restores 0.8; an out-of-range number is corrected; settings are saved on Run; closing with unsaved edits asks; closing during a run asks.
-6. **Folders:** a missing output folder is created; an unwritable one is refused before anything downloads.
-7. **Linux:** the GUI opens in WSL, and Thai text displays.
-8. **Maintainer checks** (list the steps): the window matches GUI.md visually on Windows; colours, hover and the NEON radio dot (if possible).
-9. **No regressions:** the terminal path works as before, and all tests pass.
+No active slice.
 
 How every slice works:
 1. Work only on the slice's branch, created from an up-to-date `main`.
