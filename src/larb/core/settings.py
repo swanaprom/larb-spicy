@@ -44,8 +44,10 @@ def validate_settings(settings: Settings) -> None:
 def correct_crossfade(text: str) -> float:
     """The crossfade the GUI shows after the operator leaves the field (SPEC §7).
 
-    Not a number (blank, spaces, letters, "nan") -> the default. 0 or less -> the
-    3-frame floor. More than the maximum -> the maximum. Anything else is kept.
+    Not a number (blank, spaces, letters, "nan") -> the default. Below the 3-frame
+    floor (0 and negatives included) -> the floor. More than the maximum -> the
+    maximum. Anything else is kept. The settings file itself still accepts any value
+    above 0 (validate_settings); this only corrects what the operator types.
     """
     try:
         value = float(text.strip().replace(",", "."))
@@ -53,7 +55,7 @@ def correct_crossfade(text: str) -> float:
         return DEFAULT_CROSSFADE_S
     if math.isnan(value):
         return DEFAULT_CROSSFADE_S
-    if value <= 0:
+    if value < MIN_CROSSFADE_FIELD_S:
         return MIN_CROSSFADE_FIELD_S
     return min(value, MAX_CROSSFADE_S)
 

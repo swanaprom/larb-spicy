@@ -69,8 +69,8 @@ class CrossfadeTest(unittest.TestCase):
         for text in ("", "   ", "abc", "1s", "nan", "--1"):
             self.assertEqual(correct_crossfade(text), 0.8, msg=text)
 
-    def test_zero_or_less_becomes_the_3_frame_floor(self):
-        for text in ("0", "-1", "-0.5", " 0.0 "):
+    def test_below_the_3_frame_floor_becomes_the_floor(self):
+        for text in ("0", "-1", "-0.5", " 0.0 ", "0.05", "0.099"):
             self.assertEqual(correct_crossfade(text), 0.1, msg=text)
 
     def test_above_10_becomes_10(self):
@@ -78,7 +78,7 @@ class CrossfadeTest(unittest.TestCase):
             self.assertEqual(correct_crossfade(text), 10.0, msg=text)
 
     def test_in_range_is_kept(self):
-        for text, value in (("0.05", 0.05), ("1", 1.0), (" 2.5 ", 2.5), ("10", 10.0), ("1,5", 1.5)):
+        for text, value in (("0.1", 0.1), ("1", 1.0), (" 2.5 ", 2.5), ("10", 10.0), ("1,5", 1.5)):
             self.assertEqual(correct_crossfade(text), value, msg=text)
             validate_settings(Settings())   # and the default itself is valid
 
