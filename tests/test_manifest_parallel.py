@@ -19,7 +19,7 @@ TOLERANCE_S = 0.1
 
 
 def settings(parallel=3):
-    return Settings(processing=ProcessingSettings(audio_only=True),
+    return Settings(processing=ProcessingSettings(audio_only=True, crossfade_duration_seconds=1.0),
                     download=DownloadSettings(max_parallel_lookups=parallel, max_retries=2))
 
 

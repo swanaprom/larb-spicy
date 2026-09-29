@@ -25,7 +25,7 @@ from larb.core.models import DownloadSettings, Level, ProcessingSettings, Settin
 SHORT_VIDEO = FIX / "short" / "video_4s_audio_6s.mp4"
 SHORT_AUDIO = FIX / "short" / "video_6s_audio_4s.mp4"
 TOLERANCE_S = 0.1
-VIDEO = Settings(processing=ProcessingSettings(audio_only=False),
+VIDEO = Settings(processing=ProcessingSettings(audio_only=False, crossfade_duration_seconds=1.0),
                  download=DownloadSettings(max_height=360))
 
 

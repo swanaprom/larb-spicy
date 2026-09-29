@@ -66,7 +66,7 @@ class SmokeTest(PipelineTestCase):
             row(6, "fx://sewer-lying", "1:00-1:09"),         # 2.5 s past real end -> row error
             row(7, "fx://missing", "0:10-0:20"),             # unavailable -> row error
         ]
-        settings = Settings(processing=ProcessingSettings(audio_only=True, mirror=True),
+        settings = Settings(processing=ProcessingSettings(audio_only=True, mirror=True, crossfade_duration_seconds=1.0),
                             download=DownloadSettings(max_parallel_downloads=2, max_retries=2))
         result = self.run_pipeline(rows, media, CD_MP3, settings)
 
@@ -95,7 +95,7 @@ class SmokeTest(PipelineTestCase):
     def test_audio_fade_out(self):
         """The last song is loud up to its end, so the silence at the end is the fade-out's doing."""
         media = FakeMedia({"fx://xg": (XG, 189.0)})
-        settings = Settings(processing=ProcessingSettings(audio_only=True))
+        settings = Settings(processing=ProcessingSettings(audio_only=True, crossfade_duration_seconds=1.0))
         result = self.run_pipeline([row(2, "fx://xg", "0:30-0:40")], media, CD_MP3, settings)
         expected = self.real_length(CD_MP3) + (41 - 29) - 1.0
         actual = self.real_length(result.output_path)
@@ -109,7 +109,7 @@ class SmokeTest(PipelineTestCase):
             row(3, "fx://thai", "0:02-0:06", mirrored="1"),   # already mirrored: left as is
             row(4, "fx://thai", "0:03-0:07", mirrored="   "), # only spaces = not mirrored yet
         ]
-        settings = Settings(processing=ProcessingSettings(audio_only=False, mirror=True),
+        settings = Settings(processing=ProcessingSettings(audio_only=False, mirror=True, crossfade_duration_seconds=1.0),
                             download=DownloadSettings(max_height=360))
         result = self.run_pipeline(rows, media, CD_MP4, settings)
 
@@ -121,7 +121,8 @@ class SmokeTest(PipelineTestCase):
         self.assert_fades_to_silence(result.output_path, actual)
         self.assertLess(self.last_frame_luma(result.output_path), BLACK_LUMA, "the video should end black")
         self.assertEqual(media.downloads, 1)                  # same video three times
-        mirror_log = [e.message for e in self.sink.events if e.stage == "measure" and e.level is Level.DEBUG]
+        mirror_log = [e.message for e in self.sink.events if e.stage == "measure" and e.level is Level.DEBUG
+                      and "mirror" in e.message]
         self.assertEqual([m.endswith("mirror True") for m in mirror_log], [True, False, True])
 
 

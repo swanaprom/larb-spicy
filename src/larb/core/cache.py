@@ -38,18 +38,46 @@ def find_cached(cache_dir: Path, stem: str) -> Path | None:
     return None
 
 
+def _cache_files(cache_dir: Path) -> list[Path]:
+    """The files in cache_dir named by the cache rule (plus leftovers of interrupted
+    downloads). The operator may point the cache at any folder, so nothing else in
+    it ever counts. Subfolders are never included."""
+    if not cache_dir.is_dir():
+        return []
+    return [path for path in cache_dir.iterdir() if path.is_file() and _CACHE_NAME_RE.match(path.name)]
+
+
+def cache_summary(cache_dir: Path) -> tuple[int, int]:
+    """How many files clear_cache would delete, and their total size in bytes."""
+    files = _cache_files(cache_dir)
+    return len(files), sum(path.stat().st_size for path in files)
+
+
 def clear_cache(cache_dir: Path) -> int:
     """Delete the cached downloads in cache_dir and return how many files were deleted.
 
     Only files named by the cache rule (plus leftovers of interrupted downloads)
-    are deleted. The operator may point the cache at any folder, so anything
-    else in it is left alone. Subfolders are never touched.
+    are deleted; see _cache_files.
     """
-    if not cache_dir.is_dir():
-        return 0
-    deleted = 0
-    for path in cache_dir.iterdir():
-        if path.is_file() and _CACHE_NAME_RE.match(path.name):
-            path.unlink()
-            deleted += 1
-    return deleted
+    files = _cache_files(cache_dir)
+    for path in files:
+        path.unlink()
+    return len(files)
+
+
+def remove_leftovers(cache_dir: Path, stem: str) -> list[Path]:
+    """Delete what an interrupted download of `stem` left behind and return it.
+
+    Only for a download that did not finish: every "<stem>.<...>" file is a piece
+    of it (e.g. "<stem>.webm.part", "<stem>.f136.mp4"). A file another program
+    still holds open is skipped.
+    """
+    removed = []
+    for path in _cache_files(cache_dir):
+        if path.name.startswith(f"{stem}."):
+            try:
+                path.unlink()
+                removed.append(path)
+            except OSError:
+                pass
+    return removed

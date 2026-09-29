@@ -67,7 +67,8 @@ def _atomic_write(path: Path, text: str) -> None:
 
 class TomlSettingsStore(SettingsStore):
     """Args:
-        path: The operator's settings file (config.toml, inside workspace/).
+        path: The operator's settings file, config/config.toml (deliberately not in
+            workspace/, which gets deleted to free space).
         template: config/example.toml. Copied as-is on first run, so the new file
             keeps its explanatory comments; also the source of defaults for keys
             missing from an older file.

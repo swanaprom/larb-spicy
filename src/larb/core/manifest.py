@@ -99,8 +99,19 @@ _ROWS_RE = re.compile(r"^(\d+)(?:[-–—](\d+))?$")
 FIRST_SONG_ROW = 2   # row 1 is the header
 
 
+def _checked_range(first: int | None, last: int | None, shown: str) -> RowRange:
+    """The form checks shared by the command line and the GUI's two fields."""
+    if first is not None and last is not None and first > last:
+        raise LarbError(f"Row range {shown} is backwards: the first row must not be after the last")
+    for edge in (first, last):
+        if edge is not None and edge < FIRST_SONG_ROW:
+            raise LarbError(f"Row range {shown} includes row {edge}: row 1 is the header, "
+                            f"so songs start at row {FIRST_SONG_ROW}")
+    return RowRange(first, last)
+
+
 def parse_row_range(text: str) -> RowRange:
-    """Parse the operator's row range, e.g. "2-10" or "5".
+    """Parse the operator's row range, e.g. "2-10" or "5" (the command line's --rows).
 
     Only the form is checked here; whether the rows exist is checked against the
     sheet by select_rows().
@@ -113,22 +124,43 @@ def parse_row_range(text: str) -> RowRange:
         raise LarbError(f"Row range {text!r} isn't in a form like 2-10 (or 5 for one row)")
     first = int(match.group(1))
     last = int(match.group(2)) if match.group(2) else first
-    if first > last:
-        raise LarbError(f"Row range {text!r} is backwards: the first row must not be after the last")
-    if first < FIRST_SONG_ROW:
-        raise LarbError(f"Row range {text!r} starts before row {FIRST_SONG_ROW}: row 1 is the "
-                        f"header, so songs start at row {FIRST_SONG_ROW}")
-    return RowRange(first, last)
+    return _checked_range(first, last, repr(text))
+
+
+def row_range_from_fields(first_text: str, last_text: str) -> RowRange | None:
+    """The GUI's "from" and "to" fields as a row range. An empty field is an open
+    edge (SPEC §8): from 3 and an empty "to" = row 3 to the last row.
+
+    Returns:
+        None when both fields are empty (all rows).
+
+    Raises:
+        LarbError: A field isn't a whole number, the range is backwards, or it
+            includes the header row.
+    """
+    edges = []
+    for name, text in (("from", first_text), ("to", last_text)):
+        text = re.sub(r"\s+", "", text or "")
+        if text and not text.isdecimal():
+            raise LarbError(f"Rows {name} {text!r} isn't a row number")
+        edges.append(int(text) if text else None)
+    if edges == [None, None]:
+        return None
+    first, last = edges
+    return _checked_range(first, last, f"{first or '(first)'}-{last or '(last)'}")
 
 
 def select_rows(rows: list[SheetRow], wanted: RowRange) -> list[SheetRow]:
     """Keep only the rows inside the range (row numbers as shown in the sheet).
+    An open edge (None) reaches the first or last song row.
 
     Raises:
         LarbError: The range reaches past the sheet's last song row.
     """
     last_row = max((r.row_number for r in rows), default=FIRST_SONG_ROW - 1)
-    if wanted.last > last_row:
+    first = wanted.first if wanted.first is not None else FIRST_SONG_ROW
+    last = wanted.last if wanted.last is not None else last_row
+    if max(first, last) > last_row:
         where = f"the last song is on row {last_row}" if rows else "the sheet has no songs"
-        raise LarbError(f"Row range {wanted.first}-{wanted.last} is outside the sheet: {where}")
-    return [r for r in rows if wanted.first <= r.row_number <= wanted.last]
+        raise LarbError(f"Row range {wanted.describe()} is outside the sheet: {where}")
+    return [r for r in rows if first <= r.row_number <= last]

@@ -14,7 +14,7 @@ from larb.core.pipeline import choose_countdown  # noqa: E402
 
 CD_URL = "https://fx//countdown"     # is_url() -> True; FakeMedia's media ID is "countdown"
 ROWS = [row(2, "fx://xg", "0:30-0:40")]
-AUDIO = Settings(processing=ProcessingSettings(audio_only=True),
+AUDIO = Settings(processing=ProcessingSettings(audio_only=True, crossfade_duration_seconds=1.0),
                  download=DownloadSettings(max_retries=2))
 
 

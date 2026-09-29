@@ -31,11 +31,14 @@ class DownloadSettings:
     max_parallel_lookups: int = 5
 
 
+DEFAULT_CROSSFADE_S = 0.8   # also in config/example.toml (SPEC §7)
+
+
 @dataclass(frozen=True)
 class ProcessingSettings:
     audio_only: bool = True
     mirror: bool = False
-    crossfade_duration_seconds: float = 1.0
+    crossfade_duration_seconds: float = DEFAULT_CROSSFADE_S
 
 
 @dataclass(frozen=True)
@@ -72,10 +75,19 @@ class SheetRow:
 @dataclass(frozen=True)
 class RowRange:
     """Which sheet rows to use, both ends included, numbered as the operator sees
-    them in the sheet (the header is row 1, so the first song is row 2)."""
+    them in the sheet (the header is row 1, so the first song is row 2).
 
-    first: int
-    last: int
+    Attributes:
+        first: None = an open edge: from the first song row (SPEC §8).
+        last: None = an open edge: to the last row with content.
+    """
+
+    first: int | None
+    last: int | None
+
+    def describe(self) -> str:
+        """For the log, e.g. "2-10", "3-(last)", "(first)-10"."""
+        return f"{self.first or '(first)'}-{self.last or '(last)'}"
 
 
 @dataclass(frozen=True)
@@ -187,6 +199,24 @@ class Level(Enum):
 
 
 @dataclass(frozen=True)
+class Activity:
+    """Something that runs for a while alongside others, e.g. one download.
+
+    The GUI shows one line per started activity until it ends, with a timer.
+
+    Attributes:
+        key: Stable ID, the same in the started and ended events (e.g. the cache
+            stem "abc123_v720"; two songs can share a title, never a key).
+        label: What to show, e.g. "Perfect Night - LE SSERAFIM".
+        started: True when it starts; False when it ends (done, failed or stopped).
+    """
+
+    key: str
+    label: str
+    started: bool
+
+
+@dataclass(frozen=True)
 class LogEvent:
     """One thing that happened, for the console, the log file and the GUI.
 
@@ -194,6 +224,9 @@ class LogEvent:
         progress: (done, total) when the event reports progress through a stage,
             e.g. (12, 40) for "checked 12 of 40 rows". The GUI reads this field,
             never the message text. None for ordinary events.
+        activity: Set when the event marks an activity starting or ending (e.g. a
+            download). Such events are DEBUG, so they don't clutter the console or
+            the GUI's log. The GUI reads this field, never the message text.
     """
 
     level: Level
@@ -201,6 +234,7 @@ class LogEvent:
     message: str
     row_number: int | None = None
     progress: tuple[int, int] | None = None
+    activity: Activity | None = None
 
 
 # ---------------------------------------------------------------------------

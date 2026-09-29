@@ -22,7 +22,7 @@ max_height = 720             # file-only. Largest video height to download, in p
 [processing]
 audio_only = true
 mirror = false                   # two modes, see §8 "Mirror rule"
-crossfade_duration_seconds = 1.0
+crossfade_duration_seconds = 0.8 # above 0, at most 10. Not a number in the GUI restores 0.8.
 # Deliberately NOT configurable (hard-coded):
 # - Audio normalization: always on, peak to −1 dBFS (§9).
 # - Output video format: H.264, standard 4:2:0 color, 30 fps, height = download.max_height.

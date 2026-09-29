@@ -35,7 +35,7 @@ class AudioLengthTest(PipelineTestCase):
         media = FakeMedia({"fx://sewer": (SEWER, 67.0)})
         # 2 s ranges at different places; with padding each clip is 4 s.
         rows = [row(n + 2, "fx://sewer", f"0:{10 + 2 * n:02d}-0:{12 + 2 * n:02d}") for n in range(SONGS)]
-        settings = Settings(processing=ProcessingSettings(audio_only=True))
+        settings = Settings(processing=ProcessingSettings(audio_only=True, crossfade_duration_seconds=1.0))
         result = self.run_pipeline(rows, media, CD_OPUS, settings)   # raised RenderError before the fix
 
         cd = self.real_length(CD_OPUS)

@@ -1,4 +1,5 @@
-"""Settings file: download.max_parallel_lookups (slice 2), loaded, saved and validated."""
+"""Settings file: download.max_parallel_lookups (slice 2), loaded, saved and validated;
+the crossfade default and the GUI's correction of the field (slice 5)."""
 
 import shutil
 import sys
@@ -12,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fakes import ROOT  # noqa: E402
 from larb.adapters.toml_settings import TomlSettingsStore  # noqa: E402
 from larb.core.errors import ConfigError  # noqa: E402
-from larb.core.settings import validate_settings  # noqa: E402
+from larb.core.models import Settings  # noqa: E402
+from larb.core.settings import correct_crossfade, validate_settings  # noqa: E402
 
 TEMPLATE = ROOT / "config" / "example.toml"
 
@@ -51,6 +53,34 @@ class LookupsSettingTest(unittest.TestCase):
         settings = TomlSettingsStore(self.path, TEMPLATE).load()
         with self.assertRaisesRegex(ConfigError, "max_parallel_lookups must be 1 or more"):
             validate_settings(replace(settings, download=replace(settings.download, max_parallel_lookups=0)))
+
+
+class CrossfadeTest(unittest.TestCase):
+    def test_default_is_0_8(self):
+        self.assertEqual(Settings().processing.crossfade_duration_seconds, 0.8)
+        store_dir = Path(tempfile.mkdtemp(prefix="test_", dir=ROOT / "workspace"))
+        try:
+            loaded = TomlSettingsStore(store_dir / "config.toml", TEMPLATE).load()
+            self.assertEqual(loaded.processing.crossfade_duration_seconds, 0.8)   # the template agrees
+        finally:
+            shutil.rmtree(store_dir, ignore_errors=True)
+
+    def test_not_a_number_restores_the_default(self):
+        for text in ("", "   ", "abc", "1s", "nan", "--1"):
+            self.assertEqual(correct_crossfade(text), 0.8, msg=text)
+
+    def test_zero_or_less_becomes_the_3_frame_floor(self):
+        for text in ("0", "-1", "-0.5", " 0.0 "):
+            self.assertEqual(correct_crossfade(text), 0.1, msg=text)
+
+    def test_above_10_becomes_10(self):
+        for text in ("10.5", "99", "inf"):
+            self.assertEqual(correct_crossfade(text), 10.0, msg=text)
+
+    def test_in_range_is_kept(self):
+        for text, value in (("0.05", 0.05), ("1", 1.0), (" 2.5 ", 2.5), ("10", 10.0), ("1,5", 1.5)):
+            self.assertEqual(correct_crossfade(text), value, msg=text)
+            validate_settings(Settings())   # and the default itself is valid
 
 
 if __name__ == "__main__":

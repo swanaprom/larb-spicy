@@ -77,7 +77,7 @@ class ChunkedRenderTest(PipelineTestCase):
         media = FakeMedia({"fx://thai": (THAI_MP4, 8.0)})
         rows = [row(2, "fx://thai", "0:01-0:05"), row(3, "fx://thai", "0:02-0:06", mirrored="1"),
                 row(4, "fx://thai", "0:03-0:07")]
-        settings = Settings(processing=ProcessingSettings(audio_only=False, mirror=True),
+        settings = Settings(processing=ProcessingSettings(audio_only=False, mirror=True, crossfade_duration_seconds=1.0),
                             download=DownloadSettings(max_height=360))
         with mock.patch.object(processor, "CHUNK_SEGMENTS", 2):      # 6 segments -> 3 chunks
             result = self.run_pipeline(rows, media, CD_MP4, settings)
