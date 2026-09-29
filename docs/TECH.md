@@ -255,6 +255,8 @@ Newest first. Date · what was tried · result · where it's now documented.
 
 | Date | Finding | Result | Documented in |
 | ---- | ------- | ------ | ------------- |
+| 2026-09-29 | Stopping FFmpeg with "q" on stdin, MP3 and 720p H.264, 3 runs each | exits 0.11–0.17 s / 0.42–0.47 s after the stop; partial files stay readable | §18 |
+| 2026-09-29 | Cancelling a real yt-dlp download from its progress hook | `StoppedError` 1.0 s after cancel; only a `.part` left, removed by the core | §18 |
 | 2026-09-28 | Video in 12-segment chunks + one-pass audio, 3 / 6 / 71 songs | same frame count as one pass; 6-song chunk 0.83 GB; 3-song render +2.6 % vs slice 2 with the audio pass in parallel (+17.5 % without) | §16 |
 | 2026-09-28 | `-threads 1` per input, one-pass video 2 / 4 / 6 songs | ~9 % less memory, same time; not enough on its own | §16 |
 | 2026-09-28 | Audio ~6 ms short per segment: cause | Opus container length > decoded audio (countdown 5.341 vs 5.329 s); not the seek. Fixed with `apad` + `atrim` | §16 |
@@ -560,3 +562,30 @@ Windows 11, i5-6400, home connection. Pythons installed side by side: 3.11.9, 3.
 - The executable bit on the `.sh` files had to be set in git (above). LF endings in the clone confirmed (`file`: no CRLF).
 
 **Not tested:** Mac (no Mac: Homebrew offer, `python-tk@3.13` hint); the Windows "yes" path with a real install (tested only with a version winget doesn't have, which fails → python.org); the Windows tkinter-missing message.
+
+## 18. Slice 5, Part A — what the GUI needs from the core (2026-09-29, branch `slice-5-gui`)
+
+**Port changes (approved by the maintainer 2026-09-29):** `MediaSource.cancel()`, `MediaProcessor.cancel()` and `StoppedError`; `LogEvent.activity` (`Activity`: `key`, `label`, `started`). Also approved: `larb/app.py` is now the one place that wires adapters to ports (the CLI uses it; the GUI will).
+
+**Stopping a run.** The GUI calls `Pipeline.stop()` from its own thread. It sets the pipeline's flag and calls both `cancel()`s; `run()` then raises `StoppedError("Stopped by the operator")`. [found: offline tests, `tests/test_stop.py`]
+- The core checks the flag between stages, before each row's look-up and before each download; queued rows and downloads never start. Retry pauses are `Event.wait()`, so a stop cuts them short (test: < 0.9 s into a 1 s pause).
+- **A look-up already running finishes** (yt-dlp has no way to interrupt `extract_info`); the maintainer accepted the wait (2026-09-29). The sheet fetch (one request) isn't interrupted either.
+- **yt-dlp:** `cancel()` sets a flag that a `progress_hooks` / `postprocessor_hooks` entry checks; it raises `yt_dlp.utils.DownloadCancelled`, yt-dlp's own "stop now" exception, which its extraction wrapper re-raises unchanged (checked in yt-dlp 2026.08.19, `YoutubeDL._handle_extraction_exceptions`). The adapter turns anything raised after a stop into `StoppedError` and never falls back to a fresh look-up then. **Live:** a real 720p download cancelled after 1 s raised `StoppedError` at 1.0 s and left `oKBwWQI-IoI_v720.f136.mp4.part`; `remove_leftovers` deleted it. [found 2026-09-29]
+- **Leftovers:** the core removes every `<stem>.*` file of an interrupted download (`cache.remove_leftovers`, same name rule as `clear_cache`), and logs each. Finished downloads stay cached.
+- **FFmpeg:** `run_tool` now uses `Popen`, reads stdout/stderr on two threads (FFmpeg blocks if a pipe fills), and on a stop writes `q` to FFmpeg's stdin, then kills it after `QUIT_GRACE_S` = 5 s. `communicate()` can't be used: it closes stdin, and `q` could no longer be sent. Measured with `-re` generators, stop at 2 s, 3 runs each: MP3 encode exits **0.11–0.17 s** after the stop, H.264 720p **0.42–0.47 s**; every partial file stays readable (ffprobe: 2.16–2.20 s). A kill (Windows `TerminateProcess`) would leave an MP4 without its index. [found 2026-09-29]
+- A stopped render that wrote something is renamed `_FAILED` like a failed one; in video mode the output file is only written by the final join, so a stop during the chunks leaves nothing there. Chunk, audio and graph files are deleted (graphs are kept only for a real failure).
+- Tests: stop during look-ups (the running one finishes, the other 5 never start), during downloads (finished file kept, `.part` removed, the queued download never starts), during a retry pause, during a 3-chunk video render with the audio pass running beside it (real FFmpeg), `_FAILED` after a stopped render that wrote something, stop before `run()`, and `run_tool` alone. Checked against broken builds: with `Pipeline.stop()` not cancelling the media source, or `FfmpegProcessor.cancel()` doing nothing, the download and render tests fail.
+
+**Download markers.** One `started` and one ended `Activity` per download (countdown included), keyed by the cache stem, emitted at DEBUG in stage `download`: the log file has them, the console and the GUI's log don't show them. Retries don't add lines; a failure or a stop still sends the end (`finally`). [found: `tests/test_markers.py`]
+
+**Progress.** Besides checking (§14) and video parts (§16): `download` `(0, N)` on the INFO line that starts the stage, then `(done, N)` per finished download (a failed one counts as done) at DEBUG; `measure` `(n − 1, N)` before each song, at DEBUG. [found]
+
+**Row range, open edges.** `RowRange.first` / `last` may be `None`; `row_range_from_fields("3", "")` = row 3 to the last row with content, `("", "10")` = first song row to 10, both empty = `None` (all rows). Non-numbers, backwards and header rows are refused with the same messages as `--rows`. The command line keeps `first-last` (`--rows 3-` is refused). [found]
+
+**Folders.** `settings.resolve_folder`: empty = `workspace/<name>`; relative = from the project folder (fixes the SPEC §14 known issue: `workspace/output` no longer becomes `workspace/workspace/output`); absolute as is. `ensure_folder` creates it at run start, before any download, and names the folder if it can't (e.g. a file in the way, no permission). `folder_setting` gives what the GUI saves: `""` when the shown full path is the default folder, so `config.toml` survives moving the project folder (maintainer decision 2026-09-29). [found]
+
+**Crossfade.** Default 0.8 (`models.DEFAULT_CROSSFADE_S`, `config/example.toml`). An existing `config.toml` keeps its own value (loading only fills in missing keys). `settings.correct_crossfade` for the GUI field: not a number (blank, letters, `nan`) → 0.8; 0 or less → 0.1 (the 3-frame floor, maintainer decision 2026-09-29); over 10 (and `inf`) → 10; `1,5` is read as 1.5. Values between 0 and 0.1 are kept, as the file allows them. [found]
+
+**Tests.** 109 (+34), ~90 s. Tests whose expected lengths assume 1 s crossfades now set `crossfade_duration_seconds=1.0` explicitly instead of relying on the default.
+
+**Live, no regression:** `python -m larb <live sheet>` (audio, all cached): 140.02 s = planned, with the operator's `config.toml` at 0.8; `config.toml` unchanged by the run. [found 2026-09-29]
