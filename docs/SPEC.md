@@ -1,4 +1,4 @@
-**Version:** 2026.1 (CalVer: `<year>.<index_of_versions_in_same_year>`)
+**Version:** 2026.2 (CalVer: `<year>.<index_of_versions_in_same_year>`)
 
 > This doc is written to survive months-long gaps and generational hand-off. If something feels obvious right now, write it down anyway — it won't be obvious in six weeks or to the next maintainer.
 
@@ -44,6 +44,8 @@ Keep this current — a future non-technical maintainer will live here.
 
 ## 5. Architecture Overview
 
+The operator window (layout, behavior, colours) is specified in [GUI.md](https://claude.ai/chat/GUI.md). This section covers how the parts fit together.
+
 A short narrative + a diagram (even ASCII) beats prose alone here, since this is the thing that decays fastest in your memory between sessions.
 
 ```
@@ -81,7 +83,7 @@ Adapters can be replaced without touching the core, as long as the port stays th
 |FFmpeg binary|pip-bundled binary (`static-ffmpeg`), **FFmpeg 7.1 or newer**|Lives in the venv, pinned with it, no admin rights needed. Fallback: a system FFmpeg, if it's 7.1 or newer; else prompt the operator to install one. Why 7.1: long song lists need an option only 7.1+ has, and one version rule means one tested code path. An older FFmpeg stops the run with a clear "too old" message|
 |JS runtime (Deno / Node)|**Not required** — add only if yt-dlp actually breaks without one|2026-09 spike: downloads work without one (yt-dlp prints a deprecation warning). Node also works if passed explicitly. If it ever becomes necessary, same handling as system-bound FFmpeg (check + ask). Note kept in HANDOFF.md|
 |Trim / mirror / crossfade|FFmpeg via `subprocess`, through one internal helper module. **Audio: one pass. Video: chunks of 6 songs (hard-coded), joined**|Helper owns every FFmpeg call, keeps binary path separate from the argument list. One pass gives exact lengths and A/V sync, but for video it opens every song at once and needs about 0.5 GB of memory per song (measured 2026-09), so it fails after ~6–8 songs on a low-mid PC. Chunking with the tested hybrid method (TECH §10) keeps memory flat for any list length; used always, so there is one code path. Measured 2026-09: a 71-song video peaked under 1 GB; with the audio pass running alongside the video chunks, a 3-song render is about 3% slower than one pass. 6 songs per chunk leaves room for 60 fps sources or a higher `max_height`. Audio one pass used 0.32 GB for 71 songs|
-|GUI framework|Tkinter (`ttk`)|Zero dependencies (nothing to pin, nothing that can vanish from PyPI), most examples for AI-assisted successors, and enough styling (colors, fonts, log tags) for the actual UI. Rejected: Qt/PySide6 (heavy + licensing questions), CustomTkinter (third-party, risks lagging a Python bump), PySimpleGUI (now needs a license key).|
+|GUI framework|Tkinter (`ttk`)|Zero dependencies (nothing to pin, nothing that can vanish from PyPI), most examples for AI-assisted successors, and enough styling (colors, fonts, log tags) for the actual UI. Rejected: Qt/PySide6 (heavy + licensing questions), CustomTkinter (third-party, risks lagging a Python bump), PySimpleGUI (now needs a license key). Fixed dark theme with one accent colour: plain Tkinter doesn't follow the system's light/dark setting without extra work. Design: [GUI.md](https://claude.ai/chat/GUI.md)|
 |Config format|TOML — `tomllib` (read, 3.11+) + `tomli-w` (write, pinned)|Python has no built-in TOML writer. But align best among the goals.|
 |Sheet access|Public CSV export URL + standard library (`csv`)|No credentials to inherit or expire, no Google Cloud console for a successor, already tested including the special-character/encoding fix. Matches the §3 non-goal on sharing settings. Local CSV file stays as fallback (§9 stage 2). Rejected API + service account: only buys private-sheet reads and write-back, neither needed. Revisit if writing back to the sheet is ever wanted|
 |Packaging|Clone repo + `setup_once` / `run` scripts (`.bat` for Windows, `.sh` for Linux/Mac)|Plain `python -m venv` + `requirements.txt` with exact `==` pins. No extra tools needed beyond Python itself. Rejected: PyInstaller releases, `make` (see §3)|
@@ -125,8 +127,9 @@ max_height = 720             # file-only. Largest video height to download, in p
 [processing]
 audio_only = true
 mirror = false                   # two modes, see §8 "Mirror rule"
-crossfade_duration_seconds = 1.0 # above 0, at most 10. The MOST each join uses: a join next to a short
+crossfade_duration_seconds = 0.8 # above 0, at most 10. The MOST each join uses: a join next to a short
                                  # clip gets less, with a warning (§9 stage 6). No "no crossfade" option by design.
+                                 # Default 0.8. In the GUI, input that isn't a number restores the default.
 # Deliberately NOT configurable (hard-coded):
 # - Audio normalization: always on, peak to −1 dBFS (§9).
 # - Output video format: H.264, standard 4:2:0 color, 30 fps, height = download.max_height.
@@ -169,7 +172,7 @@ Current sheet layout (2026-09), in order: `ชื่อเพลง` (song title
 
 Note: because the URL and length checks ask YouTube, building the manifest needs internet. With `max_parallel_lookups` at once it averages about 0.6 s per row (2026-09: 12 rows in about 7 s), so a 300-row list takes a few minutes. It still happens before any download, so a bad row never costs a download.
 
-**Row range:** a run can be limited to part of the sheet, e.g. rows `2-40` today and `41-80` tomorrow, so a long list can be done in sections. Rows are numbered exactly as Google Sheets shows them (the header is row 1, so the first song is row 2). A single number such as `5` means `5-5`. No range = all rows. A backwards range, or one outside the sheet, stops the run with a message naming the problem. Operators set it in the GUI (a first-row / last-row field); on the command line it's `--rows first-last`.
+**Row range:** a run can be limited to part of the sheet, e.g. rows `2-40` today and `41-80` tomorrow, so a long list can be done in sections. Rows are numbered exactly as Google Sheets shows them (the header is row 1, so the first song is row 2). A single number such as `5` means `5-5`. No range = all rows. A backwards range, or one outside the sheet, stops the run with a message naming the problem. Operators set it in the GUI with a "from" and a "to" field, where **an empty field is an open edge**: from 3 with an empty "to" means row 3 to the last row; an empty "from" with to 10 means the first song row to row 10; both empty means all rows. On the command line it's `--rows first-last`.
 
 **Mirror rule** (`processing.mirror`):
 
@@ -196,7 +199,9 @@ Turn your numbered usage scenario into a state machine / stage list with **input
 |5. Download songs|manifest URLs|cached song media|skip if already cached (resume-safe). Up to `max_parallel_downloads` at once; retry each up to `max_retries` times, then row error.|
 |6. Check & measure|cached media, time ranges|real length + loudness peak of each clip|YouTube's length is rounded to whole seconds, so the real file is re-checked. End time past the real length by **about 1 s or less → trim to fit, row warning**. More than that → row error, skip. A (nearly) silent clip (peak ≤ −60 dB) gets no volume boost and a row warning.<br>**Crossfade per join:** each join gets the setting, or the most its two clips can hold without their fades overlapping, whichever is smaller (a clip with fades on both sides must keep at least one frame to itself; this also guarantees a clean cut point inside every countdown for chunking). The end fade-out follows the same rule. A shortened join gives a row warning for a song; a short countdown gives **one** warning per run, not one per join. A clip under 3 frames (0.1 s) aborts the run (countdown) or is a row error (song).<br>**Short streams:** if a clip's real audio or video is more than 0.5 s shorter than the planned clip (padding included), row warning (countdown: once per run). Smaller gaps, normal in real files, are padded silently|
 |7. Render|countdown + songs in sequence, settings|final output file|Trim with padding, mirror (per §8 Mirror rule), peak normalization (always on), crossfades and countdowns. Every segment is forced to exactly its planned length (audio padded with silence or cut, video by repeating the last frame), so small gaps in real files never add up. Audio in one FFmpeg run; video in chunks of 6 songs (§6).<br>**Only a checked output gets its final name:** the render writes `<name>.rendering.<ext>`; after the output length matches the plan it's renamed to the final name, otherwise to `<name>_FAILED.<ext>`, including when FFmpeg fails after writing something. Leftover `*.rendering.mp3` / `*.rendering.mp4` files from a crash are deleted at the start of the next run (only that exact pattern; a locked one is skipped with a warning). Protocol: if a specific song is known bad, warn and skip it; don't kill the whole compilation. **End fade-out:** the last song fades to silence and to black over the crossfade duration, ending exactly at the end of the output, which keeps its planned length. Hard-coded, no setting. The core decides the fade (it's part of the render plan); the renderer applies it, with a curved audio fade so the very end is fully silent|
-|8. Unlock GUI|(run end signal?)|settings GUI and TOML editable again|—|
+|8. Unlock GUI|run end|settings in the GUI editable again|—|
+
+**Stopped by the operator:** in the GUI, the Run button becomes Stop during a run, and stopping asks for confirmation first. A stopped run ends like any failed one: nothing unverified gets the final output name (anything already rendered becomes `_FAILED`), songs already downloaded stay cached, and interrupted downloads are cleaned up. Then the GUI unlocks.
 
 ## 10. Caching Strategy
 
@@ -204,7 +209,9 @@ Turn your numbered usage scenario into a state machine / stage list with **input
     - No title or artist in the key: titles can contain characters Windows forbids in filenames, and fixing a typo on the sheet would otherwise cause a re-download. Titles appear in the logs instead.
     - The manual-download naming rule (for dropping a file into the cache by hand) is in HANDOFF.md.
 - Cache location: from `[download]`. Default under `workspace/cache/` (gitignored, §15).
-- Invalidation: cache never expires on its own. After each successful run the operator is asked whether to clear it (default: No), since that depends on their machine (plenty of disk and quick iteration, or very limited space). A clear-cache button is also always available in the GUI.
+- Invalidation: cache never expires on its own; clearing it depends on the operator's machine (plenty of disk and quick iteration, or very limited space).
+    - **GUI:** no question after a run. A warning line at the end of the log reminds the operator how much the cache holds, and the Clear cache button (with a confirmation) is always there.
+    - **Terminal (`run.bat` / `run.sh`):** asks after each successful run (default: No), since there's no button there.
 - Clearing deletes **only** files named by the cache key rule above, plus leftovers of interrupted downloads, never anything else in the folder. Because it matches by name pattern, the cache must live in a folder of its own (§7): an operator file that happens to fit the pattern would be deleted.
 
 ## 11. Logging & Observability
@@ -250,6 +257,7 @@ Running list — append here instead of losing the thought between sessions.
 - YouTube reports song length rounded to whole seconds, so the early check (§8) can't catch every overrun; the after-download check (§9 stage 6) stays as the second guard.
 - Sheet column mapping is file-only for now (§7). A future generation can expose it in the GUI if the sheet layout changes often.
 - YouTube may rate-limit a connection after heavy use ("Sign in to confirm you're not a bot", then HTTP 429). It clears on its own after an hour or more; HANDOFF tells the operator to wait and retry. Using browser cookies would avoid it, but borrows a logged-in account's session, so it's deliberately not supported for now (maintainer decision 2026-09-28; see HANDOFF upgrades).
+- Relative folder paths in `config.toml` are read as starting inside `workspace/`, so writing `workspace/...` doubles the folder name. Intended rule: relative to the project folder. The GUI avoids it by always showing and storing full paths.
 - Every run re-checks every row on YouTube, even when all songs are cached. Remembering video lengths between runs is a recommended upgrade (HANDOFF).
 
 ## 15. Repository & Version Control
