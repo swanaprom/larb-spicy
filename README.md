@@ -12,12 +12,14 @@ Hence the variant name, **Spicy~**
 
 ## Quick Start
 
+[Watch on Youtube](https://www.youtube.com/watch?v=BpTuA_GEUMA)
+
 You need **git** and an internet connection. Everything else (the right Python, the libraries,
 FFmpeg) is found or set up by the scripts, inside this folder. They ask before installing
 anything outside it.
 
 **1. Clone** the repository (any folder, spaces in the path are fine):
-
+(or download from tags, but downloading not guarantee git updating compatibility)
 ```
 git clone https://github.com/swanaprom/larb-spicy.git
 cd larb-spicy
