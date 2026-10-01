@@ -24,6 +24,9 @@ LOG_DIR = WORKSPACE / "logs"                    # one log file per run, newest 5
 # config/config.toml is gitignored; config/example.toml is its committed template.
 CONFIG_FILE = ROOT / "config" / "config.toml"
 TEMPLATE_FILE = ROOT / "config" / "example.toml"
+# The window's remembered Sheet and Countdown fields (gui/memory.py). Gitignored, and
+# kept apart from config.toml: what one run used, not settings.
+LAST_INPUTS_FILE = ROOT / "config" / "last_inputs.toml"
 
 
 def settings_store() -> TomlSettingsStore:

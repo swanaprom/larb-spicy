@@ -12,7 +12,7 @@ from pathlib import Path
 
 from larb.core.errors import LarbError, StoppedError
 from larb.core.manifest import row_range_from_fields
-from larb.core.models import Level, LogEvent, RowRange, Settings
+from larb.core.models import LengthEstimate, Level, LogEvent, RowRange, Settings
 from larb.core.settings import correct_crossfade, folder_setting, resolve_folder
 
 
@@ -22,6 +22,7 @@ class Phase(Enum):
     STOPPING = "stopping"   # Stop confirmed; waiting for the run to end
     FINISHED = "finished"   # the last run produced an output
     FAILED = "failed"       # the last run was stopped or aborted
+    ESTIMATING = "estimating"   # Est. Length is working; ends back in the phase before it
 
 
 @dataclass(frozen=True)
@@ -34,17 +35,24 @@ class Controls:
     run_button: bool
     clear_cache: bool
     open_output: bool     # Open file / Open folder
+    est_length: bool
 
 
-def controls(phase: Phase, audio_only: bool) -> Controls:
-    busy = phase in (Phase.RUNNING, Phase.STOPPING)
+def controls(phase: Phase, audio_only: bool, sheet_filled: bool = False) -> Controls:
+    """Args:
+        sheet_filled: The Sheet field has something in it (Est. Length needs a sheet).
+    """
+    running = phase in (Phase.RUNNING, Phase.STOPPING)
+    # An estimate locks like a run, so the answer matches the fields as they were.
+    busy = running or phase is Phase.ESTIMATING
     return Controls(
         inputs=not busy,
         mirror=not busy and not audio_only,   # mirroring only affects the picture
-        run_is_stop=busy,
-        run_button=phase is not Phase.STOPPING,   # stopping already; nothing more to press
+        run_is_stop=running,
+        run_button=phase not in (Phase.STOPPING, Phase.ESTIMATING),   # nothing more to press
         clear_cache=not busy,
         open_output=phase is Phase.FINISHED,
+        est_length=sheet_filled and not busy,
     )
 
 
@@ -110,7 +118,8 @@ def shown_folder(text: str, default_name: str, project_dir: Path, workspace: Pat
 # ---------------------------------------------------------------------------
 
 # Stage -> label words while counting (LogEvent.progress), e.g. "Checking 12 / 40".
-_COUNTED = {"manifest": "Checking", "download": "Downloading", "measure": "Measuring"}
+_COUNTED = {"manifest": "Checking", "download": "Downloading", "measure": "Measuring",
+            "estimate": "Checking"}
 # Render progress is milliseconds of output written, shown as a percentage.
 _PERCENT = {"render": "Rendering"}
 # Stage -> label for a step without numbers (an INFO event without progress).
@@ -133,6 +142,9 @@ class ProgressView:
 
     def start(self) -> None:
         self.text, self.fraction, self.failed = "Starting", None, False
+
+    def estimating(self) -> None:
+        self.text, self.fraction, self.failed = "Estimating length", None, False
 
     def update(self, event: LogEvent) -> None:
         if event.progress is not None and (event.stage in _COUNTED or event.stage in _PERCENT):
@@ -239,6 +251,48 @@ def elapsed(seconds: float) -> str:
     hours, rest = divmod(seconds, 3600)
     minutes, secs = divmod(rest, 60)
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+# ---------------------------------------------------------------------------
+# Est. Length
+# ---------------------------------------------------------------------------
+
+def length_text(seconds: float) -> str:
+    """1 hour 46 min 20 s, 3 min 5 s, 45 s (rounded to the second)."""
+    total = round(seconds)
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if hours or minutes:
+        parts.append(f"{minutes} min")
+    parts.append(f"{secs} s")
+    return " ".join(parts)
+
+
+def left_out_lines(estimate: LengthEstimate) -> list[str]:
+    """One line per reason, e.g. "2 rows left out (time range can't be read)"."""
+    return [f"{n} row{'s' if n != 1 else ''} left out ({reason})" for reason, n in estimate.left_out]
+
+
+def estimate_message(estimate: LengthEstimate) -> str:
+    """The Est. Length pop-up (GUI.md 3.2)."""
+    first = (f"Estimated: {length_text(estimate.length_s)}" if estimate.songs
+             else "No usable songs: nothing would be rendered.")
+    return "\n".join([first, *left_out_lines(estimate)])
+
+
+def estimate_log_line(estimate: LengthEstimate) -> str:
+    """The one INFO line that keeps the result after the pop-up closes."""
+    if estimate.songs:
+        text = (f"Estimated length: {length_text(estimate.length_s)} ({estimate.songs} song(s): "
+                f"{estimate.from_cache} measured from the cache, "
+                f"{estimate.songs - estimate.from_cache} from their time ranges)")
+    else:
+        text = "Estimated length: no usable songs"
+    left_out = left_out_lines(estimate)
+    return f"{text}; {'; '.join(left_out)}" if left_out else text
 
 
 # ---------------------------------------------------------------------------

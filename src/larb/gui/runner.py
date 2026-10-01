@@ -16,7 +16,7 @@ from larb.adapters.file_events import FileEventSink, MultiEventSink
 from larb.adapters.toml_settings import TomlSettingsStore
 from larb.core.cache import cache_summary
 from larb.core.errors import LarbError, StoppedError
-from larb.core.models import Level, LogEvent, RunResult
+from larb.core.models import LengthEstimate, Level, LogEvent, RunResult
 from larb.core.pipeline import Pipeline
 from larb.core.ports import EventSink
 from larb.gui.state import RunRequest, cache_reminder
@@ -34,39 +34,57 @@ class QueueEventSink(EventSink):
 
 @dataclass(frozen=True)
 class Done:
-    """The run ended. Exactly one of result / error is set."""
+    """The run (or estimate) ended. Exactly one of result / error is set."""
 
-    result: RunResult | None
+    result: RunResult | LengthEstimate | None
     error: Exception | None
 
 
-class RunWorker:
-    """One run on a background thread. Start it, maybe stop it, wait for Done on `queue`.
+class _Worker:
+    """Pipeline work on a background thread. Start it, maybe stop it, wait for Done on `queue`.
 
     Args:
         store: The settings store the window loaded (the sheet adapter reads its
             [sheet.columns]).
     """
 
-    def __init__(self, store: TomlSettingsStore, request: RunRequest) -> None:
+    def __init__(self, store: TomlSettingsStore, request: RunRequest, name: str) -> None:
         self.queue: queue.Queue = queue.Queue()
         self._store = store
         self._request = request
         self._lock = threading.Lock()
         self._pipeline: Pipeline | None = None
         self._stop_asked = False
-        self._thread = threading.Thread(target=self._run, name="larb-run", daemon=True)
+        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
 
     def start(self) -> None:
         self._thread.start()
 
     def stop(self) -> None:
-        """Ask the run to stop; returns at once. Done still arrives on the queue."""
+        """Ask the work to stop; returns at once. Done still arrives on the queue."""
         with self._lock:
             self._stop_asked = True
             pipeline = self._pipeline
         if pipeline is not None:
             pipeline.stop()
+
+    def _attach(self, pipeline: Pipeline) -> None:
+        """Make the pipeline stoppable; stop it now if Stop came while it was being built."""
+        with self._lock:
+            self._pipeline = pipeline
+            stop_now = self._stop_asked
+        if stop_now:
+            pipeline.stop()
+
+    def _run(self) -> None:
+        raise NotImplementedError
+
+
+class RunWorker(_Worker):
+    """One run."""
+
+    def __init__(self, store: TomlSettingsStore, request: RunRequest) -> None:
+        super().__init__(store, request, "larb-run")
 
     def _run(self) -> None:
         log_file = FileEventSink(app.LOG_DIR)
@@ -77,11 +95,7 @@ class RunWorker:
             events.emit(LogEvent(Level.INFO, "start", f"Log file: {log_file.path}"))
             countdown = app.countdown_for_run(request.countdown, request.settings)
             run = app.build_run(self._store, events)
-            with self._lock:
-                self._pipeline = run.pipeline
-                stop_now = self._stop_asked   # Stop pressed while the run was being put together
-            if stop_now:
-                run.pipeline.stop()
+            self._attach(run.pipeline)
             events.emit(LogEvent(Level.INFO, "start", f"{run.tools_text}, settings: {app.CONFIG_FILE}"))
             result = run.pipeline.run(request.source, countdown, request.settings, rows=request.rows)
             events.emit(LogEvent(Level.INFO, "finished", f"{result.songs_rendered} song(s) -> "
@@ -111,6 +125,35 @@ class RunWorker:
         reminder = cache_reminder(files, size)
         if reminder:
             events.emit(LogEvent(Level.WARNING, "cache", reminder))
+
+
+class EstimateWorker(_Worker):
+    """Est. Length (GUI.md 3.2).
+
+    No log file: an estimate isn't a run, and the log folder keeps only the 5 newest
+    files, so estimates would push real runs out. Its events still go on `queue`, for
+    the progress label and the countdown's download line; the window logs only the result.
+    """
+
+    def __init__(self, store: TomlSettingsStore, request: RunRequest) -> None:
+        super().__init__(store, request, "larb-estimate")
+
+    def _run(self) -> None:
+        events = QueueEventSink(self.queue)
+        result, error = None, None
+        request = self._request
+        try:
+            countdown = app.countdown_for_run(request.countdown, request.settings)
+            run = app.build_run(self._store, events)
+            self._attach(run.pipeline)
+            result = run.pipeline.estimate(request.source, countdown, request.settings, rows=request.rows)
+        except LarbError as e:   # StoppedError included: the window was closed
+            error = e
+        except Exception as e:   # a bug: still end cleanly and say what happened
+            error = LarbError(f"Unexpected error: {e!r}")
+            traceback.print_exc()   # no log file for an estimate: the details go to the console
+        finally:
+            self.queue.put(Done(result, error))
 
 
 def cache_folder(setting: str) -> Path:

@@ -16,8 +16,27 @@ _TIME = r"(\d+)[.:](\d{2})(?:[.:](\d{2}))?"
 _RANGE_RE = re.compile(rf"^{_TIME}[-–—]{_TIME}$")
 
 
+# Short reasons a row can't be used, the same for every row with that kind of problem.
+# Est. Length counts left-out rows by these (GUI.md 3.2).
+URL_EMPTY = "URL is empty"
+BAD_TIME_RANGE = "time range can't be read"
+START_PAST_END = "start is past the end of the song"
+END_PAST_END = "end is more than 1 s past the end of the song"
+CLIP_TOO_SHORT = "clip is too short"
+CACHED_UNREADABLE = "cached file can't be read"
+
+
 class RowProblem(Exception):
-    """A row can't be used. The message is shown to the operator as the reason."""
+    """A row can't be used. The message is shown to the operator as the reason.
+
+    Attributes:
+        reason: One of the short reasons above, for counting rows by kind of problem.
+            "" = no general reason given; the message is the reason.
+    """
+
+    def __init__(self, message: str, reason: str = "") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def _to_seconds(a: str, b: str, c: str | None) -> int:
@@ -83,8 +102,11 @@ def parse_row(row_number: int, title: str, artist: str, url: str,
     """
     url = (url or "").strip()
     if not url:
-        raise RowProblem("URL is empty")
-    start, end = parse_time_range(time_range)
+        raise RowProblem("URL is empty", URL_EMPTY)
+    try:
+        start, end = parse_time_range(time_range)
+    except RowProblem as problem:
+        raise RowProblem(str(problem), BAD_TIME_RANGE) from None
     warnings = []
     title, artist = (title or "").strip(), (artist or "").strip()
     if not title:

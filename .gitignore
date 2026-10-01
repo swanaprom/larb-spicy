@@ -11,6 +11,7 @@ workspace/
 
 # --- Local config & secrets ---
 config.toml
+config/last_inputs.toml
 .env
 *credentials*.json
 

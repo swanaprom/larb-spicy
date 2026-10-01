@@ -271,6 +271,26 @@ class ManifestEntry:
         return self.title or self.media.title or self.url
 
 
+@dataclass(frozen=True)
+class LengthEstimate:
+    """Est. Length's answer (GUI.md 3.2): the output's planned length, worked out
+    without downloading songs.
+
+    Attributes:
+        length_s: The planned output length. 0 when no song is usable.
+        songs: How many songs it counts.
+        from_cache: Of those, how many were measured from their cached file (exact);
+            the others count by their time range, padding included.
+        left_out: (reason, number of rows) for rows a run would skip, in the order
+            each reason first appears in the sheet.
+    """
+
+    length_s: float
+    songs: int
+    from_cache: int
+    left_out: tuple[tuple[str, int], ...] = ()
+
+
 @dataclass
 class RunResult:
     output_path: Path

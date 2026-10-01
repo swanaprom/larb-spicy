@@ -2,12 +2,14 @@
 state.py, the run happens in runner.py, and the core does the work.
 
 The window reads the settings once when it opens and saves them when Run is pressed
-(SPEC §7). It never calls yt-dlp or FFmpeg (SPEC §5).
+(SPEC §7). The Sheet and Countdown fields are remembered the same way, in their own
+file (memory.py). It never calls yt-dlp or FFmpeg (SPEC §5).
 """
 
 import queue
 import time
 import tkinter as tk
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
@@ -19,11 +21,13 @@ from larb.core.errors import LarbError, StoppedError
 from larb.core.models import Level, LogEvent, Settings
 from larb.core.settings import correct_crossfade, ensure_folder, validate_settings
 from larb.gui import shortcuts, system, theme
+from larb.gui.memory import LastInputs, load_last_inputs, save_last_inputs
 from larb.gui.opening import OpenAttempt, start_open
-from larb.gui.runner import Done, RunWorker, cache_folder
+from larb.gui.runner import Done, EstimateWorker, RunWorker, cache_folder
 from larb.gui.state import (ActiveDownloads, Fields, LogCounts, LogFilter, Phase, ProgressView,
-                            bottom_row, clear_cache_question, controls, log_line, open_failure_message,
-                            run_request, settings_from_fields, shown_folder, shown_in_log, visible)
+                            bottom_row, clear_cache_question, controls, estimate_log_line, estimate_message,
+                            log_line, open_failure_message, run_request, settings_from_fields, shown_folder,
+                            shown_in_log, visible)
 from larb.gui.widgets import ColorButton, HoverHint, OverallBar, PlaceholderEntry, SweepBar, ask
 
 TITLE = "LARB - Spicy"
@@ -34,6 +38,8 @@ OPEN_POLL_MS = 200      # how often an Open file / Open folder click is checked 
 LABEL_CHARS = 48        # active download titles are cut to this
 MIRROR_HINT = ("Everything: every song ends up mirrored; rows already marked in the sheet's "
                "Mirrored column are not flipped twice. Ignore: nothing is flipped.")
+EST_LENGTH_HINT = ("How long the output would be, without downloading any song. Songs already "
+                   "downloaded for this mode are measured; the others count by their time range.")
 VIDEO_TYPES = [("Video or audio", "*.mp4 *.mkv *.webm *.mov *.mp3 *.m4a *.wav"), ("All files", "*.*")]
 CSV_TYPES = [("CSV files", "*.csv"), ("All files", "*.*")]
 
@@ -42,16 +48,23 @@ class Window:
     """Args:
         store: The loaded settings store; `settings` is what it loaded.
         mac: Lay the bottom row out as on a Mac (mirrored).
+        inputs_file: Where the Sheet and Countdown fields are remembered.
+            Default: app.LAST_INPUTS_FILE.
     """
 
-    def __init__(self, root: tk.Tk, store: TomlSettingsStore, settings: Settings, mac: bool) -> None:
+    def __init__(self, root: tk.Tk, store: TomlSettingsStore, settings: Settings, mac: bool,
+                 inputs_file: Path | None = None) -> None:
         self.root = root
         self.store = store
         self.settings = settings        # as last loaded or saved
         self.mac = mac
+        self.inputs_file = inputs_file or app.LAST_INPUTS_FILE
         self.fonts = theme.apply(root)
         self.phase = Phase.IDLE
-        self.worker: RunWorker | None = None
+        self.worker: RunWorker | EstimateWorker | None = None
+        # What an estimate puts back when it ends: it doesn't change what the last run left.
+        self.phase_before_estimate = Phase.IDLE
+        self.progress_before_estimate = ProgressView()
         self.closing = False            # close the window once the run has stopped
         self.output_path: Path | None = None
         self.progress = ProgressView()
@@ -70,6 +83,10 @@ class Window:
         self._build_bottom(outer).grid(row=2, column=0, sticky="nsew")
 
         self._load_fields(settings)
+        remembered = load_last_inputs(self.inputs_file)
+        self.sheet.set_value(remembered.sheet)
+        self.countdown.set_value(remembered.countdown)
+        self.sheet.on_change(self._apply_controls)   # Est. Length needs a sheet
         self._apply_controls()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         shortcuts.install(root)
@@ -235,12 +252,11 @@ class Window:
         pane = ttk.Frame(master, style="Pane.TFrame", padding=(12, 10))
         self.run_button = ColorButton(pane, "RUN", self._on_run_button, bg=theme.NEON, fg=theme.WHITE,
                                       font=self.fonts.run, padx=36, pady=8, width=8)   # RUN and STOP same size
-        self.est_length = ColorButton(pane, "Est. Length", None, bg=theme.LIGHT, fg=theme.BLACK,
-                                      font=self.fonts.normal, pady=6,
+        self.est_length = ColorButton(pane, "Est. Length", self._start_estimate, bg=theme.LIGHT,
+                                      fg=theme.BLACK, font=self.fonts.normal, pady=6,
                                       disabled_bg=theme.mix(theme.LIGHT, theme.PANE, 0.6),
                                       disabled_fg="#4A4A4A")
-        self.est_length.set_enabled(False)   # planned (HANDOFF), not built
-        HoverHint(self.est_length, "Coming later")
+        HoverHint(self.est_length, EST_LENGTH_HINT)
         self.clear_cache_button = ColorButton(pane, "Clear cache", self._clear_cache, bg=theme.LIGHT,
                                               fg=theme.BLACK, font=self.fonts.normal, pady=6)
         widgets = {"run": self.run_button, "est_length": self.est_length,
@@ -310,7 +326,8 @@ class Window:
     # -- enabled / locked --------------------------------------------------------------
 
     def _apply_controls(self) -> None:
-        c = controls(self.phase, audio_only=self.output_var.get() == "audio")
+        c = controls(self.phase, audio_only=self.output_var.get() == "audio",
+                     sheet_filled=bool(self.sheet.value().strip()))
         for widget in self.inputs:
             widget.configure(state="normal" if c.inputs else "disabled")
         for radio in self.mirror_radios:
@@ -323,6 +340,7 @@ class Window:
             self.run_button.style(text="RUN", bg=theme.NEON)
         self.run_button.set_enabled(c.run_button)
         self.clear_cache_button.set_enabled(c.clear_cache)
+        self.est_length.set_enabled(c.est_length)
         self.open_file.set_enabled(c.open_output)
         self.open_folder.set_enabled(c.open_output)
 
@@ -348,6 +366,14 @@ class Window:
             return
         self.settings = request.settings
         self._clear_log()
+        fields = self._fields()
+        # Remembered when Run is pressed (GUI.md 1.1, 1.4). Never the row range: a
+        # remembered range could silently cut the next run short.
+        problem = save_last_inputs(self.inputs_file, LastInputs(sheet=fields.source.strip(),
+                                                                countdown=fields.countdown.strip()))
+        if problem:
+            self._log_now(LogEvent(Level.WARNING, "start",
+                                   f"The Sheet and Countdown fields can't be remembered: {problem}"))
         self.output_path = None
         self.progress.start()
         self.downloads.clear()
@@ -359,6 +385,50 @@ class Window:
         self.worker.start()
         self.root.after(POLL_MS, self._poll)
         self.root.after(TICK_MS, self._tick)
+
+    def _start_estimate(self) -> None:
+        """Est. Length (GUI.md 3.2): the length a run with the fields as they are would
+        plan. Nothing is saved; the fields stay locked until the answer comes."""
+        if self.phase not in (Phase.IDLE, Phase.FINISHED, Phase.FAILED):
+            return
+        self._fix_crossfade()
+        self._fix_output_dir()
+        try:
+            request = run_request(self._fields(), self.settings, app.ROOT, app.WORKSPACE)
+            validate_settings(request.settings)
+        except LarbError as e:
+            self._popup("Can't estimate", str(e))
+            return
+        self.phase_before_estimate = self.phase
+        self.progress_before_estimate = replace(self.progress)
+        self.progress.estimating()
+        self.phase = Phase.ESTIMATING
+        self._apply_controls()
+        self._show_progress(True)
+        self._paint_progress()
+        self.worker = EstimateWorker(self.store, request)
+        self.worker.start()
+        self.root.after(POLL_MS, self._poll)
+        self.root.after(TICK_MS, self._tick)
+
+    def _finish_estimate(self, done: Done) -> None:
+        self.phase = self.phase_before_estimate
+        self.progress = self.progress_before_estimate
+        self._show_progress(self.phase is not Phase.IDLE)
+        self._paint_progress()
+        self._apply_controls()
+        if self.closing:
+            # The window was closed during the estimate: now the usual close (which may
+            # still ask about unsaved settings).
+            self.closing = False
+            self._on_close()
+            return
+        if done.error is None:
+            self._log_now(LogEvent(Level.INFO, "estimate", estimate_log_line(done.result)))
+            self._popup("Est. Length", estimate_message(done.result))
+        elif not isinstance(done.error, StoppedError):
+            self._log_now(LogEvent(Level.ERROR, "estimate", " ".join(str(done.error).split())))
+            self._popup("Can't estimate", str(done.error))
 
     def _confirm_stop(self) -> None:
         answer = ask(self.root, "Stop", "Stop the run?", [("stop", "Stop"), ("keep", "Keep running")],
@@ -400,7 +470,8 @@ class Window:
         if self.phase is not Phase.STOPPING:
             self.progress.update(event)
         self.downloads.update(event, time.monotonic())
-        if shown_in_log(event):
+        # An estimate logs only its result (_finish_estimate), not its steps.
+        if shown_in_log(event) and self.phase is not Phase.ESTIMATING:
             self.counts.add(event)
             self._append_log(event)
             self._paint_filters()
@@ -409,6 +480,9 @@ class Window:
         self.worker = None
         self.downloads.clear()
         self._paint_downloads()
+        if self.phase is Phase.ESTIMATING:
+            self._finish_estimate(done)
+            return
         self.progress.finish(done.error)
         self._paint_progress()
         if done.error is None:
@@ -505,6 +579,16 @@ class Window:
         self.log.configure(state="disabled")
         self._paint_filters()
 
+    def _log_now(self, event: LogEvent) -> None:
+        """Add one line from the window itself (not from a run's queue), counted and
+        scrolled like a run's lines."""
+        follow = self._log_at_bottom()
+        self.counts.add(event)
+        self._append_log(event)
+        self._paint_filters()
+        if follow:
+            self.log.see("end")
+
     def _append_log(self, event: LogEvent) -> None:
         level, stage, text = log_line(event)
         self._write_log_line(level, stage, text)
@@ -583,6 +667,11 @@ class Window:
             return
         if self.phase is Phase.STOPPING:
             self.closing = True
+            return
+        if self.phase is Phase.ESTIMATING:
+            # Nothing to ask: an estimate changes nothing. Stop it; close once it has ended.
+            self.closing = True
+            self.worker.stop()
             return
         if self._unsaved():
             answer = ask(self.root, "Close", "Save your changes?",

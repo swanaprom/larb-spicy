@@ -12,10 +12,11 @@ from pathlib import Path
 from larb.core.cache import cache_stem, find_cached, remove_leftovers
 from larb.core.errors import (DownloadError, LarbError, MediaUnavailableError, RateLimitedError,
                               RenderError, StoppedError)
-from larb.core.manifest import ParsedRow, RowProblem, parse_row, select_rows
-from larb.core.models import (Activity, ClipInfo, DownloadSettings, Level, LogEvent, ManifestEntry,
-                              MediaInfo, MediaKind, RenderPlan, RowRange, RunResult, Segment, Settings,
-                              SheetRow)
+from larb.core.manifest import (CACHED_UNREADABLE, CLIP_TOO_SHORT, END_PAST_END, START_PAST_END,
+                                ParsedRow, RowProblem, parse_row, select_rows)
+from larb.core.models import (Activity, ClipInfo, DownloadSettings, LengthEstimate, Level, LogEvent,
+                              ManifestEntry, MediaInfo, MediaKind, RenderPlan, RowRange, RunResult, Segment,
+                              Settings, SheetRow)
 from larb.core.ports import EventSink, MediaProcessor, MediaSource, SongListSource
 from larb.core.settings import ensure_folder, resolve_folder, validate_settings
 
@@ -37,6 +38,10 @@ FAILED_SUFFIX = "_FAILED"         # <name>_FAILED.<ext>: output rejected by the 
 STOPPED_MESSAGE = "Stopped by the operator"
 RATE_LIMITED_MESSAGE = ("YouTube is limiting this connection. Wait a while, then run again; "
                         "finished songs stay cached.")
+
+# Est. Length's stand-in path for a song that isn't downloaded yet (its clip comes
+# from the time range). Never opened: an estimate plans, it doesn't render.
+_NOT_DOWNLOADED = Path()
 
 # Characters Windows doesn't allow in file names.
 _ILLEGAL_FILENAME_CHARS = set('<>:"/\\|?*')
@@ -98,6 +103,41 @@ def plan_crossfades(durations: list[float], setting_s: float) -> tuple[tuple[flo
     limits = crossfade_limits(durations, fade_out=True)
     joins = tuple(min(setting_s, limits[i], limits[i + 1]) for i in range(len(durations) - 1))
     return joins, min(setting_s, limits[-1])
+
+
+def song_clip(start_s: float, end_s: float, real_s: float | None) -> tuple[float, float, float]:
+    """The part of a song that's played: its time range plus padding, clamped to the
+    file (SPEC §4 "Padding", §9 stage 6). A run and Est. Length both use this.
+
+    Args:
+        real_s: The file's real length. None = not known (Est. Length, for a song not
+            downloaded yet): the length rules are skipped and the end padding isn't clamped.
+
+    Returns:
+        (clip start, clip end, how far the end was past the real length and trimmed; 0 if not)
+
+    Raises:
+        RowProblem: The song can't be used; its reason says why.
+    """
+    start, end, trimmed = float(start_s), float(end_s), 0.0
+    if real_s is not None:
+        if start >= real_s:
+            raise RowProblem(f"start {start:.0f} s is past the song's real length ({real_s:.2f} s)",
+                             START_PAST_END)
+        if end > real_s:
+            trimmed = end - real_s
+            if trimmed > OVERRUN_TRIM_LIMIT_S:
+                raise RowProblem(f"end {end:.0f} s is {trimmed:.2f} s past the song's real length "
+                                 f"({real_s:.2f} s)", END_PAST_END)
+            end = real_s
+    clip_start = max(0.0, start - PADDING_S)
+    clip_end = end + PADDING_S if real_s is None else min(real_s, end + PADDING_S)
+    # A short clip only shortens its crossfades (_build_plan); below this it can't
+    # hold even a one-frame crossfade on both sides.
+    if clip_end - clip_start < MIN_CLIP_S:
+        raise RowProblem(f"clip is {clip_end - clip_start:.2f} s, shorter than {MIN_CLIP_S:.2f} s",
+                         CLIP_TOO_SHORT)
+    return clip_start, clip_end, trimmed
 
 
 @dataclass
@@ -236,11 +276,8 @@ class Pipeline:
              rows: RowRange | None) -> RunResult:
         # Stage 1: lock settings. `settings` is frozen and used as-is for the whole run;
         # changes made elsewhere during the run are not picked up (SPEC §5).
-        validate_settings(settings)
-        kind = MediaKind(settings.processing.audio_only, settings.download.max_height)
+        kind, cache_dir = self._lock_settings(settings)
         # Folders first, so one that can't be created stops the run before any download.
-        cache_dir = ensure_folder(resolve_folder(settings.download.cache_directory, "cache",
-                                                 self._project_dir, self._workspace), "cache")
         output_dir = ensure_folder(resolve_folder(settings.output.directory, "output",
                                                   self._project_dir, self._workspace), "output")
         self._remove_leftover_renders(output_dir)
@@ -248,23 +285,11 @@ class Pipeline:
                   f"mirror: {'on' if settings.processing.mirror else 'off'}. Media tool: {self._processor.describe()}")
 
         # Stage 2: fetch the song list.
-        self._log(Level.INFO, "sheet", f"Reading song list: {source}")
-        sheet_rows = self._songs.fetch_rows(source)
-        self._check_stop()
-        self._log(Level.INFO, "sheet", f"{len(sheet_rows)} row(s) found")
-        if rows is not None:
-            sheet_rows = select_rows(sheet_rows, rows)
-            self._log(Level.INFO, "sheet", f"Using rows {rows.describe()}: "
-                      f"{len(sheet_rows)} row(s) with content")
+        sheet_rows = self._read_sheet(source, rows)
 
         # Stage 3: prepare the countdown before the manifest on purpose: a run can't succeed
         # without it, so a bad one should stop the run before minutes of manifest look-ups.
-        try:
-            countdown_segment = self._prepare_countdown(countdown, kind, cache_dir, settings)
-        except RateLimitedError as e:
-            self._note_rate_limit("countdown", e)
-        self._check_stop()
-        self._check_rate_limit(sheet_rows, kind, cache_dir)
+        countdown_segment = self._countdown_stage(countdown, kind, cache_dir, settings, sheet_rows)
 
         # Stage 4: build the manifest (offline rules and cached files, then ask the media source).
         entries = self._build_manifest(sheet_rows, settings.download, kind, cache_dir)
@@ -294,7 +319,139 @@ class Pipeline:
         # Stage 8 (unlock the GUI) belongs to the GUI; nothing to do here.
         return RunResult(output, len(songs), self._errors, self._warnings, cache_dir)
 
+    # -- length estimate ---------------------------------------------------------
+
+    def estimate(self, source: str, countdown: str, settings: Settings,
+                 rows: RowRange | None = None) -> LengthEstimate:
+        """Est. Length (GUI.md 3.2): the output length a run with these inputs would plan,
+        without looking up or downloading any song.
+
+        Uses the run's own steps and planning code: the same sheet reading, the same
+        countdown stage (a countdown URL that isn't cached is looked up and downloaded,
+        with the usual retries and rate-limit stop, so its length is exact and the run
+        finds it cached), the same clip rule (song_clip) and the same render plan.
+        Songs cached for this mode are measured from the file (exact); the others count
+        by their time range, padding included. A video that's gone from YouTube still
+        counts: only a run finds that out (accepted limit).
+
+        Raises:
+            StoppedError: stop() was called.
+            LarbError: Like run(): the sheet, the row range or the countdown can't be used.
+        """
+        try:
+            return self._estimate(source, countdown, settings, rows)
+        except StoppedError:
+            raise StoppedError(STOPPED_MESSAGE) from None
+
+    def _estimate(self, source: str, countdown: str, settings: Settings,
+                  rows: RowRange | None) -> LengthEstimate:
+        kind, cache_dir = self._lock_settings(settings)
+        sheet_rows = self._read_sheet(source, rows)
+        countdown_segment = self._countdown_stage(countdown, kind, cache_dir, settings, sheet_rows)
+        songs, from_cache, left_out = self._estimate_songs(sheet_rows, settings.download, kind, cache_dir)
+        self._check_stop()
+        if not songs:
+            return LengthEstimate(0.0, 0, 0, left_out)
+        plan = self._build_plan(countdown_segment, songs, settings.processing.crossfade_duration_seconds, kind)
+        return LengthEstimate(plan.expected_duration_s, len(songs), from_cache, left_out)
+
+    def _estimate_songs(self, rows: list[SheetRow], dl: DownloadSettings, kind: MediaKind, cache_dir: Path
+                        ) -> tuple[list[tuple[ManifestEntry, Segment]], int, tuple[tuple[str, int], ...]]:
+        """Each row's clip, without the media source: measured from the cached file, or
+        from the time range. Cached files are measured max_parallel_lookups at a time,
+        like the manifest's checks.
+
+        Returns:
+            (the usable songs with their clips, how many came from the cache,
+            (reason, rows) for the rows left out)
+        """
+        total = len(rows)
+        self._log(Level.DEBUG, "estimate", f"Estimating from {total} row(s)", progress=(0, total))
+        done = 0
+        done_lock = threading.Lock()
+
+        def check(row: SheetRow) -> tuple[ManifestEntry | None, Segment | None, bool, str]:
+            """(entry, clip, cached, "") for a usable row; (None, None, False, reason) for one left out."""
+            nonlocal done
+            self._check_stop()
+            try:
+                result = *self._estimate_row(row, kind, cache_dir), ""
+            except RowProblem as problem:
+                result = None, None, False, problem.reason or str(problem)
+            with done_lock:
+                done += 1
+                self._log(Level.DEBUG, "estimate", f"checked {done}/{total}", row.row_number,
+                          progress=(done, total))
+            return result
+
+        songs, from_cache, left_out = [], 0, {}
+        with ThreadPoolExecutor(max_workers=dl.max_parallel_lookups) as pool:
+            for entry, clip, cached, reason in pool.map(check, rows):   # in sheet order
+                if entry is None:
+                    left_out[reason] = left_out.get(reason, 0) + 1
+                    continue
+                songs.append((entry, clip))
+                from_cache += cached
+        return songs, from_cache, tuple(left_out.items())
+
+    def _estimate_row(self, row: SheetRow, kind: MediaKind, cache_dir: Path
+                      ) -> tuple[ManifestEntry, Segment, bool]:
+        """One row for the estimate: (entry, clip, measured from the cache?). Runs in a
+        worker thread.
+
+        Raises:
+            RowProblem: A run would skip this row.
+        """
+        parsed = parse_row(row.row_number, row.song_title, row.artist, row.url, row.time_range, row.mirrored)
+        cached = self._cached_file(parsed.url, kind, cache_dir)
+        real = None
+        if cached:
+            try:
+                # Only the length is needed; the tiny peak range keeps this fast.
+                real = self._processor.measure(cached, 0.0, 0.1).duration_s
+            except RenderError as e:
+                raise RowProblem(f"can't read the cached file {cached.name}: {e}", CACHED_UNREADABLE) from None
+        start, end, _ = song_clip(parsed.start_s, parsed.end_s, real)
+        entry = ManifestEntry(parsed.row_number, parsed.title, parsed.artist, parsed.url,
+                              float(parsed.start_s), float(parsed.end_s), parsed.already_mirrored,
+                              MediaInfo(self._media.media_id(parsed.url) or "", "", real or 0.0))
+        # Mirror and gain don't change the length; they're left neutral here.
+        return entry, Segment(cached or _NOT_DOWNLOADED, start, end, mirror=False, gain_db=0.0), bool(cached)
+
     # -- stage helpers ---------------------------------------------------------
+
+    def _lock_settings(self, settings: Settings) -> tuple[MediaKind, Path]:
+        """Check the settings; return the run's media kind and its (created) cache folder."""
+        validate_settings(settings)
+        kind = MediaKind(settings.processing.audio_only, settings.download.max_height)
+        cache_dir = ensure_folder(resolve_folder(settings.download.cache_directory, "cache",
+                                                 self._project_dir, self._workspace), "cache")
+        return kind, cache_dir
+
+    def _read_sheet(self, source: str, rows: RowRange | None) -> list[SheetRow]:
+        """Stage 2: the song list, limited to the row range."""
+        self._log(Level.INFO, "sheet", f"Reading song list: {source}")
+        sheet_rows = self._songs.fetch_rows(source)
+        self._check_stop()
+        self._log(Level.INFO, "sheet", f"{len(sheet_rows)} row(s) found")
+        if rows is not None:
+            sheet_rows = select_rows(sheet_rows, rows)
+            self._log(Level.INFO, "sheet", f"Using rows {rows.describe()}: "
+                      f"{len(sheet_rows)} row(s) with content")
+        return sheet_rows
+
+    def _countdown_stage(self, countdown: str, kind: MediaKind, cache_dir: Path, settings: Settings,
+                         sheet_rows: list[SheetRow]) -> Segment:
+        """Stage 3: the countdown, ready to use. A rate limit stops the run here, saying
+        how much of the list is cached (_check_rate_limit)."""
+        segment = None
+        try:
+            segment = self._prepare_countdown(countdown, kind, cache_dir, settings)
+        except RateLimitedError as e:
+            self._note_rate_limit("countdown", e)
+        self._check_stop()
+        self._check_rate_limit(sheet_rows, kind, cache_dir)
+        return segment
 
     def _build_manifest(self, rows: list[SheetRow], dl: DownloadSettings, kind: MediaKind,
                         cache_dir: Path) -> list[ManifestEntry]:
@@ -586,28 +743,15 @@ class Pipeline:
             except RenderError as e:
                 self._log(Level.ERROR, "measure", f"skipped: can't read {path.name}: {e}", entry.row_number)
                 continue
-            real, start, end = info.duration_s, entry.start_s, entry.end_s
-            if start >= real:
-                self._log(Level.ERROR, "measure", f"skipped: start {start:.0f} s is past the "
-                          f"song's real length ({real:.2f} s)", entry.row_number)
+            real = info.duration_s
+            try:
+                start, end, trimmed = song_clip(entry.start_s, entry.end_s, real)
+            except RowProblem as problem:
+                self._log(Level.ERROR, "measure", f"skipped: {problem}", entry.row_number)
                 continue
-            if end > real:
-                over = end - real
-                if over > OVERRUN_TRIM_LIMIT_S:
-                    self._log(Level.ERROR, "measure", f"skipped: end {end:.0f} s is {over:.2f} s past "
-                              f"the song's real length ({real:.2f} s)", entry.row_number)
-                    continue
-                self._log(Level.WARNING, "measure", f"end {end:.0f} s is {over:.2f} s past the real "
-                          f"length ({real:.2f} s); trimmed to fit", entry.row_number)
-                end = real
-            # Padding, clamped to the file (SPEC §4).
-            start, end = max(0.0, start - PADDING_S), min(real, end + PADDING_S)
-            # A short clip only shortens its crossfades (_build_plan); below this it
-            # can't hold even a one-frame crossfade on both sides.
-            if end - start < MIN_CLIP_S:
-                self._log(Level.ERROR, "measure", f"skipped: clip is {end - start:.2f} s, "
-                          f"shorter than {MIN_CLIP_S:.2f} s", entry.row_number)
-                continue
+            if trimmed:
+                self._log(Level.WARNING, "measure", f"end {entry.end_s:.0f} s is {trimmed:.2f} s past the "
+                          f"real length ({real:.2f} s); trimmed to fit", entry.row_number)
             self._warn_short_streams(info, end - start, "measure", entry.display_name, entry.row_number)
             if not kind.audio_only and not info.has_video:
                 self._log(Level.WARNING, "measure", f"{entry.display_name}: {path.name} has no picture: "

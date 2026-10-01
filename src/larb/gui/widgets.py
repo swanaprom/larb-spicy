@@ -88,6 +88,10 @@ class PlaceholderEntry(ttk.Entry):
     def value(self) -> str:
         return "" if self._showing else self._var.get()
 
+    def on_change(self, callback) -> None:
+        """Call callback() whenever the text changes (typing, pasting, set_value)."""
+        self._var.trace_add("write", lambda *_args: callback())
+
     def set_value(self, text: str) -> None:
         self._hide()
         self._var.set(text)

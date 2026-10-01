@@ -40,7 +40,7 @@ def _fill_missing(doc: dict, defaults: dict) -> dict:
     return merged
 
 
-def _atomic_write(path: Path, text: str) -> None:
+def atomic_write(path: Path, text: str) -> None:
     """Write via a temp file in the same folder + os.replace, so a crash never
     leaves a half-written file. Retries because Windows refuses the replace while
     another program has the file open ("Access is denied", TECH §5)."""
@@ -82,7 +82,7 @@ class TomlSettingsStore(SettingsStore):
     def load(self) -> Settings:
         if not self._path.exists():
             try:
-                _atomic_write(self._path, self._template.read_text(encoding="utf-8"))
+                atomic_write(self._path, self._template.read_text(encoding="utf-8"))
             except OSError as e:
                 raise ConfigError(f"Can't read the template {self._template}: {e}") from None
         self._doc = _fill_missing(_read_toml(self._path), _read_toml(self._template))
@@ -104,7 +104,7 @@ class TomlSettingsStore(SettingsStore):
         p = settings.processing
         doc.setdefault("processing", {}).update(audio_only=p.audio_only, mirror=p.mirror,
                                                 crossfade_duration_seconds=p.crossfade_duration_seconds)
-        _atomic_write(self._path, tomli_w.dumps(doc))
+        atomic_write(self._path, tomli_w.dumps(doc))
         self._doc = doc
 
     def sheet_columns(self) -> dict[str, str]:
