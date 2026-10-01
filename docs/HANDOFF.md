@@ -154,14 +154,25 @@ deleted; nothing unfinished gets the normal output name (anything already writte
 
 The countdown can be a YouTube link (`--countdown <URL>`, or `countdown.default_urls` in `config.toml`). It's downloaded and cached like a song. In `config.toml`, put the link in quotes: `default_urls = ["https://www.youtube.com/watch?v=..."]`. Without quotes the file doesn't load.
 
+## How long will the output be? (Est. Length)
+
+Fill in the Sheet field (and rows, mode, countdown, crossfade as you'll run them), then press **Est. Length**. It asks YouTube nothing about the songs, so it takes seconds even for a long list:
+- songs already downloaded for this mode are measured (exact);
+- the others count by their time range (usually exact too; at most about 1 s too long per song whose range ends at the very end of its video);
+- a countdown link that isn't downloaded yet is downloaded first (the run needs it anyway).
+
+The pop-up also says how many rows a run would skip and why (e.g. "2 rows left out (time range can't be read)"). A video that has been deleted from YouTube still counts: only the run finds that out.
+
+## The Sheet and Countdown fields come back by themselves
+
+The window remembers what was in them at the last Run, in `config/last_inputs.toml` (not in `config.toml`; deleting it is harmless, the fields just start empty). The row range is **not** remembered, on purpose: a range left over from yesterday could silently cut today's run short.
+
 ## What are recommended upgrades?
 
 - **Intro clip:** an optional clip at the very start, before the first countdown (e.g. a "*Boom* Open the floor" opener). In the window: an on/off choice, plus a field for a YouTube link or file, like the countdown's; the field is greyed out when off. On by default, with the group's intro as the default (like `countdown.default_urls`). It would be cached, normalised and crossfaded like the countdown, and never mirrored.
 - Expose some configs in TOML as 'Advanced Settings' into GUI, currently hide by design to keep it direct and minimal.
-- **Est. Length:** show the planned output length before running. The button is already in the window, disabled ("Coming later"). The core already calculates the length when it plans the render; the work is to get it earlier: an **estimate** is possible right after the YouTube look-ups (YouTube's lengths are rounded to whole seconds), and it's **exact** only after the downloads, when the real files have been measured.
-- **Remember the last inputs** (sheet link, countdown) between sessions, in their own small memory file, separate from `config.toml` (which holds settings, not what one run used).
 - **The accent colours as a file-only config**, so a future generation can restyle the window without touching code. Today they are the constants at the top of `src/larb/gui/theme.py`.
-- Remember each video's length between runs. Since slice 6, a song already **cached for this mode** isn't looked up (its length comes from the file). Songs not downloaded yet, or cached only in the other mode, are still looked up on every run, e.g. while the sheet is being fixed before the first full run. Saving looked-up lengths (e.g. next to the cache) would skip those too, which is what gets a connection limited ("Sign in to confirm you're not a bot", HTTP 429).
+- Remember each video's length between runs. Since slice 6, a song already **cached for this mode** isn't looked up (its length comes from the file), and since slice 7 Est. Length doesn't look songs up at all. What's left: a **run** still looks up every song not downloaded yet for this mode (e.g. while the sheet is being fixed before the first full run, or a list cached only in the other mode). Saving looked-up lengths (e.g. next to the cache) would skip those too; those look-ups are what gets a connection limited ("Sign in to confirm you're not a bot", HTTP 429).
 - Support YouTube cookies (yt-dlp's `--cookies-from-browser`), the usual cure for the bot check. Trade-off: the program then uses a logged-in account's session. Downloads count against that account, and a heavy run could get the account itself limited or flagged, so it should be a throwaway account, never someone's personal one. Not supported for now (maintainer decision 2026-09-28); until then, wait and retry.
 - Notification: Error/Success have different noise. and also the notification thing that make icon in taskbar blink orange.
 - Redundant song inspector button: match pattern as much as possible eg., same song and artist, same videoID, still not as clear as throwing CSV to AI but could help a bit. (Song name and URL is a clear flag, the artist and song with likely similiar name but not exact is ambigous). Everything flag by this will just be report and log as warning, not error. (Or even better, also the pop up report + log).

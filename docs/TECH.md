@@ -255,6 +255,9 @@ Newest first. Date · what was tried · result · where it's now documented.
 
 | Date | Finding | Result | Documented in |
 | ---- | ------- | ------ | ------------- |
+| 2026-10-01 | Est. Length live, 3-song sheet, audio + video, uncached and cached | estimate = the run's plan to 0.01 s in every case; countdown downloaded by the estimate, found cached by the run | §21 |
+| 2026-10-01 | Est. Length on the 96-row Big Sheet, then a real audio run | estimate < 2 s, zero YouTube requests; run 3841.195 s = estimate; no bot check in 88 requests | §21 |
+| 2026-10-01 | `test_shortcuts` with a Thai keyboard active | 5 errors (no keycode for keysym), also on `main`; an in-process US layout doesn't help | §21 |
 | 2026-10-01 | 403 retry waits 0 / 2 / 5 s, 309 audio downloads, 15 min, home connection | 12 first-try 403s (3.9 %), all recovered (11 on retry 1); no bot check; sample too small to rank waits → fallback 2/4/8 s ±25 % | §20 |
 | 2026-10-01 | Cache-aware checking, live sheet, audio + video | second identical run: 0 look-ups (23 s → 6 s audio); other mode still looked up | §20 |
 | 2026-10-01 | `.mp3` countdown in video mode | black screen + sound, 1 warning; old code failed in FFmpeg | §20 |
@@ -720,3 +723,30 @@ Windows 11, 1920×1080 at 100 % scaling, Tk 8.6 (Python 3.12 venv). WSL: Ubuntu 
 **Tests.** 174 (+31), ~131 s (was ~93 s: the existing tests that exhaust their retries now really wait 2 + 4 s). New: `test_black_screen.py` (`.mp3` countdown and cover-art countdown black, one warning, sound kept; a song without a picture; audio mode silent), `test_cache_aware.py`, `test_retries.py`, `test_open_output.py` (opener with a simulated missing app on Windows and Linux; the real window's pop-up and warning), plus progress in `test_chunks.py` and `test_gui_state.py`, and the adapter's rate limits and `media_id` in `test_ytdlp_reuse.py`. Checked against the old behaviour: with `has_video` forced to True, the three video black-screen tests fail.
 
 **Open file / Open folder failing.** `gui/opening.py`: Windows `os.startfile` raises at once (no app: WinError 1155 "No application is associated…"); Linux/Mac `xdg-open` / `open` say it only through the exit code and stderr, so they're waited for (≤ 30 s) on a thread, and the window checks every 200 ms. Failure → pop-up ("No app is set to open .mp4 files. Install a media player, or use Open folder." + the system's reason) and a WARNING in the window's log. Tested with a simulated missing app, on the real `Window`. **Not tested** with a real missing app (this PC has one; the Ubuntu PC is the maintainer's).
+
+## 21. Slice 7 — Est. Length and remembered inputs (2026-10-01, branch `slice-7-length-memory`)
+
+**Est. Length: the run's own planning, minus YouTube.** `Pipeline.estimate()` goes through the run's steps with the same helpers: `_lock_settings`, `_read_sheet` (stage 2), `_countdown_stage` (stage 3), then `_build_plan` and `RenderPlan.expected_duration_s`. There is no second copy of the length maths. What differs is only where each song's length comes from: [found 2026-10-01]
+- **Cached for this mode:** `measure(file, 0, 0.1)` (length only; files measured `max_parallel_lookups` at a time, like the manifest), then `song_clip()`, the clip rule stage 6 also uses (trim within ~1 s, padding clamped to the file, 3-frame minimum). Exact.
+- **Not cached:** `song_clip(start, end, None)`: time range plus padding, start clamped at 0, end **not** clamped (the real length is unknown). Off only when the padded end reaches past the real file, by at most the 1 s padding (offline test: 0.49 s, the `sewer` fixture's 66.51 s against an end of 1:06).
+- **The countdown** goes through the normal stage 3 (maintainer decision 2026-10-01): an uncached countdown URL is looked up **and downloaded**, with the usual retries and rate-limit stop. Reason: YouTube rounds lengths to whole seconds (the countdown is 5.341 s, YouTube says 5), and the countdown plays before every song, so its error would multiply by the number of songs (~33 s on the 96-row Big Sheet). The run needs the file anyway and then finds it cached.
+- Rows a run would skip are left out and counted by reason (`RowProblem.reason`, short texts in `core/manifest.py`): empty URL, unreadable time range, and for cached songs, start past the end, end more than 1 s past the end, clip too short, unreadable file. A video that's gone from YouTube still counts (accepted limit: only a run's look-up finds out).
+- Mirror and gain don't change the length, so the estimate's segments leave them neutral; uncached songs get a stand-in path (`Path()`, never opened).
+- The estimate writes no log file (an estimate isn't a run, and only the 5 newest logs are kept). Its events reach the window only for the progress label and the countdown's download line; the window logs one INFO line (result) or one ERROR line (failure). An unexpected exception prints its traceback to the console.
+
+**Live, maintainer's sheet (3 songs), fresh cache folder, 2026-10-01:**
+
+| Mode | Estimate, nothing cached | Run: planned / actual | Estimate, cached |
+| --- | --- | --- | --- |
+| Audio | 140.023 s (4.4 s; countdown downloaded) | 140.02 / 140.023 s | 140.023 s (1.1 s) |
+| Video | 140.161 s (5.5 s; countdown downloaded) | 140.16 / 140.167 s | 140.161 s (1.2 s) |
+
+None of these songs' padded ends reach the end of their videos, so even the uncached estimate was exact. The runs found the countdown cached by the estimate (`cached, not looked up`).
+
+**Big Sheet (96 rows), main cache, countdown cached:** estimate audio 3841.2 s (1 h 4 min 1 s) in 1.9 s, video 3845.6 s in 1.5 s; 8 songs measured, 87 from time ranges, 1 row left out (URL is empty); **zero YouTube requests**. Then the real audio run (87 songs looked up and downloaded, 353 s end to end, render 204 s): **output 3841.195 s = the estimate to the millisecond**, although 87 songs were estimated from their time ranges (no padded end reached a video's end). 1 row error (the empty URL the estimate had flagged), 4 row warnings (empty title / artist). No 403, no retry, **no bot check** in 88 requests, so the rate-limit stop is still untested live.
+
+**Remembered inputs.** `gui/memory.py` writes `config/last_inputs.toml` (`sheet`, `countdown`; gitignored) with tomli-w through `toml_settings.atomic_write` (now public), when Run starts (after the window's own checks pass, before the run itself, so a run stopped by e.g. a private sheet still remembers the link). Read with `utf-8-sig`; any error, a wrong type or a missing key → empty field. The row range is never written. Not a port: the core never needs it, only the window. The terminal version doesn't remember anything.
+
+**Tests.** 219 (+45), ~139 s. New: `test_estimate.py` (core, real FFmpeg: estimate vs the plan a real run records, look-up and download counts, countdown retries and rate limit, left-out reasons, `song_clip`), `test_estimate_gui.py` (button state, pop-up and log wording, worker writes no log file, the real window with a fake worker), `test_last_inputs.py` (file round trip, corrupt / missing / BOM, Clear cache on the same folder, the real window: filled on open, saved on Run without rows, not saved when Run is refused).
+- Window tests that leave a timer pending (a worker that never finishes) printed `invalid command name "…_tick"` after the root was destroyed. Cancelling with `root.after_cancel()` in cleanup made `destroy()` fail (`can't delete Tcl command`: `after_cancel` deletes the command, `destroy` deletes it again). Cancel with the raw `root.tk.call("after", "cancel", id)` instead.
+- ⚠ **`test_shortcuts` errors (5) while the Windows keyboard is on Thai.** `no keycode for keysym "k"`: the tests generate English-letter keys, which Tk can't map under a Thai layout (the test file says so). Same on the untouched `main` code. Loading and activating US English in the test process (`LoadKeyboardLayoutW` + `ActivateKeyboardLayout`) did **not** help, so Tk seems to use the session's layout. Switch the input language to English before running the suite.

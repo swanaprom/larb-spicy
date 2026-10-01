@@ -1,6 +1,6 @@
 # GUI.md — Operator Window
 
-**Status:** built in slice 5 (release 2026.2). This file describes the window as it is; change it here first, then in code. Owned by the maintainer, like SPEC.md. SPEC wins on conflict.
+**Status:** built in slice 5 (release 2026.2); Est. Length and the remembered Sheet / Countdown fields added in slice 7. This file describes the window as it is; change it here first, then in code. Owned by the maintainer, like SPEC.md. SPEC wins on conflict.
 
 **Design goal:** minimal, but it guides the eye. The operator should always know three things at a glance: *what will happen* (top), *what is happening* (middle), and *what to press* (bottom).
 
@@ -88,7 +88,7 @@ Windows and Linux layout. On Mac, the bottom row is mirrored. The panes have no 
    4. Open file / Open folder
 3. **Bottom pane — what to press**
    1. Run / Stop
-   2. Est. Length (disabled, future)
+   2. Est. Length
    3. Clear cache
 
 ---
@@ -100,7 +100,8 @@ Card fields: **Kind** · **Maps to** (config key, or run input = not saved) · *
 ### 1.1 Sheet link / CSV file
 - **Kind:** one-line text field + Browse button (Browse picks a local CSV).
 - **Maps to:** run input.
-- **Default:** empty, placeholder "Google Sheet link / Path to CSV file". Not remembered between sessions (see Upgrades).
+- **Default:** the sheet used at the last Run (remembered, see below); empty the first time, with the placeholder "Google Sheet link / Path to CSV file".
+- **Remembered:** saved when Run is pressed, in `config/last_inputs.toml` (its own file, not `config.toml`: it's what one run used, not a setting). Filled in when the window opens. A missing or unreadable file just leaves the field empty; a remembered file that's gone is reported on Run as usual.
 - **Checked when:** on Run. A private or unreachable sheet, or a missing column header, aborts the run with a pop-up (see "Aborted runs").
 - **During a run:** locked.
 - **Why here:** used every single run, so it's first.
@@ -108,6 +109,7 @@ Card fields: **Kind** · **Maps to** (config key, or run input = not saved) · *
 ### 1.2 Row range
 - **Kind:** two small number fields, "from [ ] to [ ]".
 - **Maps to:** run input (the row range, SPEC §8).
+- **Not remembered**, on purpose: a remembered range could silently cut the next run short.
 - **Default:** an empty field is an open edge:
   - `from 3, to (empty)` → row 3 to the last row.
   - `from (empty), to 10` → the first song row to row 10.
@@ -129,8 +131,8 @@ Card fields: **Kind** · **Maps to** (config key, or run input = not saved) · *
 
 ### 1.4 Countdown
 - **Kind:** one-line field that accepts a YouTube link or a file, + Browse button. When empty, shows "(default countdown)".
-- **Maps to:** run input (`--countdown`). Empty → the core uses `countdown.default_urls` / `default_files` (§7). **Never changes the default:** defaults are the fallback, this field is for one run. (Remembering the last one used: see Upgrades.)
-- **Default:** empty = the default countdown.
+- **Maps to:** run input (`--countdown`). Empty → the core uses `countdown.default_urls` / `default_files` (§7). **Never changes the default:** defaults are the fallback, this field is for one run.
+- **Default:** what was in the field at the last Run (remembered with the Sheet field, see 1.1); empty = the default countdown.
 - **Checked when:** on Run, before the manifest (§9 stage 3).
 - **During a run:** locked.
 - **Why here:** usually left alone; below the per-event choices.
@@ -199,8 +201,16 @@ Card fields: **Kind** · **Maps to** (config key, or run input = not saved) · *
 - **Why here:** the first thing the eye lands on in the bottom row.
 
 ### 3.2 Est. Length
-- **Kind:** LIGHT background, black text, **always disabled** for now (shown greyed), with the hover hint "Coming later".
-- **Why here:** reminds the operator and successors that it's planned (HANDOFF upgrade list), without taking effort now.
+- **Kind:** LIGHT background, black text. Hover hint: what it does, and that songs not downloaded yet count by their time range.
+- **Enabled:** when the Sheet field is filled and no run is going.
+- **What it does:** reads the sheet with the window's current row range, mode, countdown and crossfade, and works out the output's length **without looking songs up on YouTube**, using the same planning as a real run (padding, each join's crossfade, the end fade-out):
+  - Songs already cached for this mode: measured from the file (exact).
+  - Other songs: from their time ranges, padding included.
+  - The countdown: measured. A countdown URL that isn't cached yet is downloaded first, like a run does (same retries; a YouTube rate limit stops it with the usual message). The run then finds it cached.
+- **While it works:** the window locks like a run (fields, Run, Est. Length, Clear cache); the progress area shows "Estimating length", then "Checking n / N" while cached files are measured. No Stop button. Closing the window stops it, then closes as usual. Nothing is saved.
+- **Result:** a pop-up, e.g. "Estimated: 1 hour 46 min 20 s", plus one line per reason for rows a run would skip, e.g. "2 rows left out (time range can't be read)", "1 row left out (URL is empty)". Also one INFO line in the log (how many songs were measured from the cache and how many from their time ranges), so it's still there after the pop-up closes. If it can't estimate (private sheet, bad row range, no countdown, ...): a pop-up with the reason and one ERROR line. An estimate writes no log file.
+- **Known limit:** a video deleted from YouTube still counts; a run finds out at its look-up. An uncached song whose time range ends at the very end of its video may count up to 1 s too long (its padding can't be clamped without the file).
+- **Why here:** next to Run: checked just before running, e.g. to fit a time slot.
 
 ### 3.3 Clear cache
 - **Kind:** LIGHT background, black text, at the far end of the bottom row (right on Windows and Linux, left on Mac).
