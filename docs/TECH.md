@@ -255,6 +255,8 @@ Newest first. Date · what was tried · result · where it's now documented.
 
 | Date | Finding | Result | Documented in |
 | ---- | ------- | ------ | ------------- |
+| 2026-10-01 | Venv whose Python was uninstalled: `run.bat`, `setup_once.bat` | both rebuild with an announcement; an interrupted rebuild skipped FFmpeg (fixed) | §20 |
+| 2026-09 | Real Ubuntu 24.04 PC (maintainer) | works; tkinter hint needed; Open file needs a media player; a cached countdown still triggered the bot check | §20 |
 | 2026-09-30 | Ctrl+C / V with Thai, US, Korean, Japanese layouts (real key messages, test thread only) | Thai did nothing before; all four work by key code; Linux needs its own binding tag | §19 |
 | 2026-09-30 | Window icons, taskbar identity, Windows 11 caption colour | small = white 16 px, big = accent 32 px (WM_GETICON); DARK title bar seen on screenshot | §19 |
 | 2026-09-29 | Window live: audio, video, private and mismatch sheets, stop while downloading / rendering, close during a run | all as GUI.md; stop ends 1.8 s / 3.3 s after the confirmation | §19 |
@@ -655,3 +657,21 @@ Windows 11, 1920×1080 at 100 % scaling, Tk 8.6 (Python 3.12 venv). WSL: Ubuntu 
 - **WSLg** once lost its X socket after WSL restarted (`couldn't connect to display ":0"`); it came back by itself within a minute. `wsl --shutdown` would also stop Docker Desktop's distro, so it wasn't used.
 
 **Tests.** 143 (+8): `tests/test_shortcuts.py` (the key tables, AltGr and other keys left alone, NumLock ignored on Windows; in real widgets: copy and paste with another letter typed, select all, English Ctrl+V pastes once, Ctrl+K does nothing, copy from a disabled text area like the log).
+
+## 20. Slice 6 — reliability (2026-10, branch `slice-6-reliability`)
+
+**Port changes (approved by the maintainer 2026-10-01):** `MediaSource.media_id(url)` (the video's ID from the URL alone, no request); `RateLimitedError` (bot check / HTTP 429), raised by `lookup` and `download`; `ClipInfo.has_video` and `Segment.has_video` (a clip with no picture).
+
+**Real Ubuntu 24.04 PC** (the maintainer's test, 2026-09; not a VM, fast network). [found]
+- Python 3.12.4 was already installed (in range); setup used it.
+- tkinter was missing; the command setup printed fixed it on the first try.
+- The window icon doesn't show. Normal on that desktop (§19: the icon is set; the desktop decides whether to draw it).
+- **Open file** did nothing until a media player was installed; the console said "no media player found". After installing VLC it worked.
+- Output: audio and mirrored video both worked. 5 songs took well under a minute.
+- ⚠ **A cached countdown still triggered the bot check**: every run looked up the countdown and every row on YouTube, even when all were cached. On the fast connection, rows ran out of retries and were skipped. Re-running a few minutes later recovered the missing song. This is what cache-aware checking and the rate-limit stop in this slice address.
+
+**A venv whose Python was uninstalled** (Windows, 2026-10-01). The maintainer had uninstalled Python 3.12; `.venv` still pointed at it (`No Python at '...Python312\python.exe'`). [found]
+- `run.bat` noticed it and announced the rebuild: `Rebuilding the environment, including a one-time FFmpeg download (~200 MB)...`, then `The .venv folder is broken (its Python doesn't start): building it with Python 3.13`.
+- `setup_once.bat`, with the venv broken the same way again (`pyvenv.cfg` pointed at the missing Python): `The .venv folder is broken (its Python doesn't start)`, rebuilt with 3.13, FFmpeg downloaded, **172 s**.
+- ⚠ **An interrupted rebuild skipped FFmpeg.** The first `run.bat` built the venv, then pip failed (a network error), so the run stopped. The next `run.bat` found a venv that starts, installed the libraries, and **never downloaded FFmpeg**: the program would have used the system FFmpeg, or stopped on a PC without one. Fixed: when `run` installs the libraries, it also checks FFmpeg (instant when the binaries are there). Checked by recreating that state (stamp file removed, no FFmpeg): the next `run.bat` downloaded it. This also covers a future `static-ffmpeg` pin change.
+- All 143 tests pass on the rebuilt 3.13 venv.
