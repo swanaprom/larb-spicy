@@ -175,7 +175,7 @@ Card fields: **Kind** · **Maps to** (config key, or run input = not saved) · *
 
 ### 2.3 Progress
 - **Kind:** two parts, shown only while a run is going:
-  - **Overall bar:** stage name + "done / total", and the label follows the run from stage to stage: "Starting" → "Reading the sheet" → "Preparing the countdown" → "Checking 12 / 40" → "Downloading 12 / 40" → "Measuring 12 / 40" → "Rendering 63%". Real progress. **Planned (slice 6):** rendering shows a filling bar with a percentage of the planned output written, for audio and video alike (today it shows "Rendering part 3 / 7" for video, and a still, empty bar for audio and for the steps between parts). **The bar is never empty and still:** any step without numbers shows a sweeping bar, like the download rows. When the run ends, the same label shows how it ended: "Finished", "Stopping..." then "Stopped: you pressed Stop", or in RED, "Stopped: <reason>" (long reasons wrap). This replaces a separate result line.
+  - **Overall bar:** stage name + "done / total", and the label follows the run from stage to stage: "Starting" → "Reading the sheet" → "Preparing the countdown" → "Checking 12 / 40" → "Downloading 12 / 40" → "Measuring 12 / 40" → "Rendering 63%" (in video mode it follows the video parts). Real progress. **The bar is never empty and still:** any step without numbers ("Starting", "Reading the sheet", the gaps between video parts, the final join) shows a sweeping bar with the plain stage name. The brief flicker between parts is fine; it shows the program is alive. When the run ends, the same label shows how it ended: "Finished", "Stopping..." then "Stopped: you pressed Stop", or in RED, "Stopped: <reason>" (long reasons wrap). This replaces a separate result line.
   - **Active downloads:** one row per download in progress (up to `max_parallel_downloads`, e.g. 3): song title, a sweeping "busy" animation (a drawn gradient bar, since Tkinter's own indeterminate bar can't show a gradient), and how long it has been downloading (e.g. `0:42`). When a song finishes, its row disappears and the next song takes its place.
 - **Maps to:** overall bar: the core's `LogEvent.progress`. Active downloads: the core's "download started" / "download finished" events for each row, as **structured data, never parsed from log text**. Not shown in the log panel, so the filter stays clean.
 - **Why the timer:** the animation only shows the program is alive; the timer shows a stuck download (normal songs finish in well under a minute).
@@ -187,6 +187,7 @@ Card fields: **Kind** · **Maps to** (config key, or run input = not saved) · *
 - **Kind:** two small buttons, bottom right of the middle pane.
 - **Maps to:** the finished output file and its folder, opened with the system's default app / file manager.
 - **Enabled:** only after a successful run; disabled otherwise.
+- **If it can't open:** e.g. no app is set to open `.mp4` files (a fresh Linux often has no media player): a pop-up with the reason ("Install a media player, or use Open folder"), also logged as a warning.
 - **Why here:** right under the progress label that says "Finished".
 
 ### 3.1 Run / Stop
