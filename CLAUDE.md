@@ -4,7 +4,44 @@ Random Dance combiner: reads a song list from a Google Sheet, downloads the YouT
 
 ## Current phase
 
-No active slice.
+**SLICE 7 — Est. Length and remembered inputs**, branch `slice-7-length-memory`. Two operator conveniences from HANDOFF's upgrade list. If either needs a port change, propose it and stop.
+
+Scope:
+
+1. **Est. Length** (GUI.md 3.2). The button becomes usable when the Sheet field is filled and no run is going.
+   - **What it does:** read the sheet with the window's current row range, mode, countdown and crossfade, and calculate the output length **without contacting YouTube**.
+     - Songs already cached for this mode: length measured from the file (exact).
+     - Other songs: from their time ranges, padding included.
+     - The countdown: measured if cached. If it's a URL that isn't cached, **one** look-up for its length is allowed.
+   - **One source of truth:** the estimate must use the **same planning code** as a real run (padding, per-join crossfades, the end fade-out), not a second copy of the length maths.
+   - **Result: a pop-up**, e.g. "Estimated: 1 hour 46 min 20 s".
+     - If rows were left out (broken time range), add one line: "2 rows left out (time range can't be read)".
+     - Also log the result as one INFO line, so it's still visible after the pop-up closes.
+   - **Known limit, accepted:** a video deleted from YouTube still counts in the estimate; the run catches it at download time.
+2. **Remember the last inputs.**
+   - **What:** the Sheet field and the Countdown field. **Not** the row range, deliberately: a remembered range could silently cut the next run short.
+   - **When:** saved when Run is pressed; filled in when the window opens.
+   - **Where:** `config/last_inputs.toml`, gitignored, separate from `config.toml`. Clear cache never touches it.
+   - **If it's missing, unreadable or points to a file that's gone:** the fields simply start empty or as remembered. No error, no crash. The usual checks happen on Run.
+3. **Docs:**
+   - GUI.md: 3.2 (Est. Length is no longer "Coming later"), 1.1 and 1.4 (remembered).
+   - HANDOFF: take Est. Length and "remember the last inputs" off the upgrade list, and note what remains of "remember each video's length" (only uncached rows still need YouTube).
+   - TECH: anything learned.
+
+Acceptance:
+
+1. **Accuracy:**
+   - Offline: for a fully cached fixture list, the estimate equals the length the real run plans (within 0.05 s). With uncached songs (fake source), it's within about 1 s per uncached song.
+   - Live: estimate, then run, on the sheet in both modes; report estimate vs actual. A fully cached rerun should match.
+2. **No YouTube:** an offline test with a fake media source that counts calls: the estimate makes zero look-ups when the countdown is cached, and exactly one when it isn't.
+3. **The button:** disabled with an empty Sheet field and during a run. The pop-up's wording and the left-out-rows line are covered by a GUI-state test.
+4. **Remembered inputs** (offline tests):
+   - saved on Run, filled in on open;
+   - the row range is never saved;
+   - Clear cache leaves the file alone;
+   - a missing or corrupt file gives empty fields, with no error.
+5. **Maintainer checks** (list the steps): click Est. Length on the live sheet and compare it with the real run's length. Close and reopen the window: Sheet and Countdown are filled in, rows are empty.
+6. **No regressions:** all tests pass (report the suite time); the terminal path works; live audio and video runs succeed.
 
 How every slice works:
 1. Work only on the slice's branch, created from an up-to-date `main`.
