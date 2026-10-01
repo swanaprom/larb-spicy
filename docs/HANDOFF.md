@@ -98,7 +98,8 @@ arguments (none = the window). No need to activate the venv. For the tests: `.ve
 - **Linux: "can't build a venv" / "tkinter is missing".** Debian/Ubuntu split these into
   separate packages; setup prints the `sudo apt install ...` line to run. The scripts never run
   `sudo` themselves. If `apt` can't find the Python version (e.g. Ubuntu 26.04 only has 3.14),
-  the deadsnakes archive has it (the command is printed too).
+  the deadsnakes archive has it (the command is printed too). Ubuntu 24.04 ships Python 3.12,
+  which is in the range, so there it isn't needed (tested on a real 24.04 PC, 2026-09).
 - **"Couldn't delete the old .venv folder".** Something still uses it: another run window, or a
   terminal/VS Code where it is activated. Close it and run again.
 - **Something weird with the venv?** Delete the `.venv` folder and run `setup_once` again. The
@@ -110,6 +111,12 @@ arguments (none = the window). No need to activate the venv. For the tests: `.ve
   and Mac already have these fonts.
 - **FFmpeg.** Setup downloads it into `.venv` (static-ffmpeg). If that fails, a system FFmpeg
   7.1 or newer is used; otherwise setup offers to install one. A run never downloads FFmpeg.
+
+## "Open file" does nothing?
+
+No app on this computer is set to open `.mp4` / `.mp3` files (seen on a fresh Ubuntu, which has
+no video player). Install a player (e.g. VLC) and try again, or use **Open folder**. The reason
+only shows in the background terminal/console ("no media player found"), not in the window.
 
 ## Updating Python (every few years)
 
@@ -137,6 +144,7 @@ The countdown can be a YouTube link (`--countdown <URL>`, or `countdown.default_
 
 ## What are recommended upgrades?
 
+- **Intro clip:** an optional clip at the very start, before the first countdown (e.g. a "*Boom* Open the floor" opener). In the window: an on/off choice, plus a field for a YouTube link or file, like the countdown's; the field is greyed out when off. On by default, with the group's intro as the default (like `countdown.default_urls`). It would be cached, normalised and crossfaded like the countdown, and never mirrored.
 - Expose some configs in TOML as 'Advanced Settings' into GUI, currently hide by design to keep it direct and minimal.
 - **Est. Length:** show the planned output length before running. The button is already in the window, disabled ("Coming later"). The core already calculates the length when it plans the render; the work is to get it earlier: an **estimate** is possible right after the YouTube look-ups (YouTube's lengths are rounded to whole seconds), and it's **exact** only after the downloads, when the real files have been measured.
 - **Remember the last inputs** (sheet link, countdown) between sessions, in their own small memory file, separate from `config.toml` (which holds settings, not what one run used).
