@@ -33,7 +33,15 @@ If a reused look-up fails anyway, the adapter looks the video up again by itself
 
 ## "Sign in to confirm you're not a bot" or "HTTP Error 429: Too Many Requests"?
 
-YouTube is limiting this internet connection because it was asked too much in a short time (seen 2026-09-28 after ~20 runs and several hundred look-ups in one morning). It's not a program bug, and retrying at once makes it worse. Wait (at least an hour) and run again. The program has no cookie option; see [TECH.md](TECH.md) §16.
+YouTube is limiting this internet connection because it was asked too much in a short time (seen 2026-09-28 after ~20 runs and several hundred look-ups in one morning). It's not a program bug, and retrying at once makes it worse.
+
+What the program does about it (since slice 6):
+- **It asks YouTube less.** A song (or countdown) already in the cache for this run's mode isn't looked up at all; its length comes from the file. A rerun of a fully cached list makes no YouTube requests. So after a limit, rerunning only asks about the songs that are still missing.
+- **It stops instead of retrying.** On the first "not a bot" or HTTP 429 answer, no new look-ups or downloads start; downloads already running finish and stay cached. The run then stops with "YouTube is limiting this connection. Wait a while, then run again; finished songs stay cached.", plus how many songs are already cached. In the window it's the usual pop-up. Nothing is rendered.
+
+What to do: wait (at least an hour, sometimes more), then run again. The program has no cookie option; see [TECH.md](TECH.md) §16, §20.
+
+The ordinary, occasional `HTTP Error 403: Forbidden` is different: it's retried by itself, waiting about 2 s, then 4 s, then 8 s, each a little random so parallel downloads don't retry at the same moment. The waits are `RETRY_BASE_S` / `RETRY_JITTER` at the top of `src/larb/core/pipeline.py` (measured: TECH §20).
 
 ## An output named `..._FAILED.mp3` / `.mp4`?
 
@@ -112,11 +120,15 @@ arguments (none = the window). No need to activate the venv. For the tests: `.ve
 - **FFmpeg.** Setup downloads it into `.venv` (static-ffmpeg). If that fails, a system FFmpeg
   7.1 or newer is used; otherwise setup offers to install one. A run never downloads FFmpeg.
 
-## "Open file" does nothing?
+## "Open file" says "No app is set to open .mp4 files"?
 
 No app on this computer is set to open `.mp4` / `.mp3` files (seen on a fresh Ubuntu, which has
-no video player). Install a player (e.g. VLC) and try again, or use **Open folder**. The reason
-only shows in the background terminal/console ("no media player found"), not in the window.
+no video player). Install a player (e.g. VLC) and try again, or use **Open folder**. The window
+shows this in a pop-up, with the system's own reason in brackets, and logs it as a warning.
+Open folder failing works the same way (no file manager set).
+
+On Linux and Mac the program waits up to 30 s for `xdg-open` / `open` to report; if it's still
+running then, it's showing something, so that counts as success.
 
 ## Updating Python (every few years)
 
@@ -149,7 +161,7 @@ The countdown can be a YouTube link (`--countdown <URL>`, or `countdown.default_
 - **Est. Length:** show the planned output length before running. The button is already in the window, disabled ("Coming later"). The core already calculates the length when it plans the render; the work is to get it earlier: an **estimate** is possible right after the YouTube look-ups (YouTube's lengths are rounded to whole seconds), and it's **exact** only after the downloads, when the real files have been measured.
 - **Remember the last inputs** (sheet link, countdown) between sessions, in their own small memory file, separate from `config.toml` (which holds settings, not what one run used).
 - **The accent colours as a file-only config**, so a future generation can restyle the window without touching code. Today they are the constants at the top of `src/larb/gui/theme.py`.
-- Remember each video's length between runs. Today every run looks up every row on YouTube again, even when the video is already downloaded. Saving the lengths (e.g. next to the cache) would let reruns of a long list skip most look-ups, which is what gets a connection limited ("Sign in to confirm you're not a bot", HTTP 429).
+- Remember each video's length between runs. Since slice 6, a song already **cached for this mode** isn't looked up (its length comes from the file). Songs not downloaded yet, or cached only in the other mode, are still looked up on every run, e.g. while the sheet is being fixed before the first full run. Saving looked-up lengths (e.g. next to the cache) would skip those too, which is what gets a connection limited ("Sign in to confirm you're not a bot", HTTP 429).
 - Support YouTube cookies (yt-dlp's `--cookies-from-browser`), the usual cure for the bot check. Trade-off: the program then uses a logged-in account's session. Downloads count against that account, and a heavy run could get the account itself limited or flagged, so it should be a throwaway account, never someone's personal one. Not supported for now (maintainer decision 2026-09-28); until then, wait and retry.
 - Notification: Error/Success have different noise. and also the notification thing that make icon in taskbar blink orange.
 - Redundant song inspector button: match pattern as much as possible eg., same song and artist, same videoID, still not as clear as throwing CSV to AI but could help a bit. (Song name and URL is a clear flag, the artist and song with likely similiar name but not exact is ambigous). Everything flag by this will just be report and log as warning, not error. (Or even better, also the pop up report + log).
