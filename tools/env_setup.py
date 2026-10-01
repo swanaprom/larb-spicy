@@ -382,7 +382,10 @@ def run(args: list[str]) -> int:
         check_tkinter()
         check_fonts()
     elif not STAMP.exists() or STAMP.read_text(encoding="utf-8").strip() != requirements_hash():
-        ensure_venv()   # requirements.txt changed (e.g. after a git pull)
+        # requirements.txt changed (e.g. after a git pull), or a rebuild was interrupted
+        # before the libraries were installed: then FFmpeg was never downloaded either.
+        ensure_venv()
+        ensure_ffmpeg(offer_install=False)   # quick when the binaries are already there
     update_yt_dlp()
 
     if not args:
