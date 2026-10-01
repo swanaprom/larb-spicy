@@ -1,5 +1,6 @@
 """The pipeline: runs the stages of SPEC §9 in order, talking to the world only through ports."""
 
+import random
 import threading
 import time
 from collections.abc import Callable
@@ -9,8 +10,8 @@ from datetime import datetime
 from pathlib import Path
 
 from larb.core.cache import cache_stem, find_cached, remove_leftovers
-from larb.core.errors import (DownloadError, LarbError, MediaUnavailableError, RenderError,
-                              StoppedError)
+from larb.core.errors import (DownloadError, LarbError, MediaUnavailableError, RateLimitedError,
+                              RenderError, StoppedError)
 from larb.core.manifest import ParsedRow, RowProblem, parse_row, select_rows
 from larb.core.models import (Activity, ClipInfo, DownloadSettings, Level, LogEvent, ManifestEntry,
                               MediaInfo, MediaKind, RenderPlan, RowRange, RunResult, Segment, Settings,
@@ -23,13 +24,19 @@ TARGET_PEAK_DB = -1.0       # peak normalization target, hard-coded (SPEC §7, �
 SILENT_PEAK_DB = -60.0      # below this a clip is treated as silent: no gain, warn instead
 OVERRUN_TRIM_LIMIT_S = 1.0  # end past the real length by up to this -> trim to fit (SPEC §9 stage 6)
 LENGTH_TOLERANCE_S = 0.1    # allowed difference between planned and actual output length
-RETRY_PAUSE_S = 1.0         # pause before retry n is n * this
+# Retry waits: RETRY_BASE_S, then twice that, four times ..., each varied by up to
+# RETRY_JITTER either way, so retries from parallel workers don't arrive together
+# (SPEC §9 stage 5). Values: TECH §20.
+RETRY_BASE_S = 2.0
+RETRY_JITTER = 0.25
 SHORT_STREAM_WARN_S = 0.5   # a clip's video or audio this much shorter than the clip -> warn
 FRAME_S = 1 / 30           # one frame of the output (30 fps is the hard-coded format, SPEC §7)
 MIN_CLIP_S = 3 * FRAME_S    # shorter clips can't hold a crossfade of even one frame on both sides
 RENDERING_SUFFIX = ".rendering"   # <name>.rendering.<ext>: output not checked yet
 FAILED_SUFFIX = "_FAILED"         # <name>_FAILED.<ext>: output rejected by the checks
 STOPPED_MESSAGE = "Stopped by the operator"
+RATE_LIMITED_MESSAGE = ("YouTube is limiting this connection. Wait a while, then run again; "
+                        "finished songs stay cached.")
 
 # Characters Windows doesn't allow in file names.
 _ILLEGAL_FILENAME_CHARS = set('<>:"/\\|?*')
@@ -55,6 +62,12 @@ def choose_countdown(given: str | None, settings: Settings) -> str:
             return candidate.strip()
     raise LarbError("No countdown. Pass --countdown with a file or a YouTube URL, or set "
                     "countdown.default_urls or countdown.default_files in the settings file")
+
+
+def retry_wait_s(attempt: int, rng: random.Random) -> float:
+    """How long to wait before retry number attempt + 1 (attempt 0 = the first retry):
+    RETRY_BASE_S x 2^attempt, varied by up to RETRY_JITTER either way."""
+    return RETRY_BASE_S * 2 ** attempt * rng.uniform(1 - RETRY_JITTER, 1 + RETRY_JITTER)
 
 
 def crossfade_limits(durations: list[float], fade_out: bool) -> list[float]:
@@ -95,6 +108,7 @@ class _RowCheck:
     row_number: int
     entry: ManifestEntry | None = None
     messages: list[tuple[Level, str]] = field(default_factory=list)
+    from_cache: bool = False   # checked from the cached file, not looked up
 
 
 class Pipeline:
@@ -106,10 +120,15 @@ class Pipeline:
         workspace: Where runtime files go. Default cache and output folders live here.
         project_dir: The project folder; relative folder settings start here
             (settings.resolve_folder). Default: the folder holding `workspace`.
+        rng: Randomness for the retry waits (retry_wait_s). Tests pass a seeded one.
+        wait: wait(seconds) waits before a retry and returns True if the run was
+            stopped meanwhile. Default: a wait that a stop ends at once. Tests pass
+            one that records the waits instead of waiting.
     """
 
     def __init__(self, songs: SongListSource, media: MediaSource, processor: MediaProcessor,
-                 events: EventSink, workspace: Path, project_dir: Path | None = None) -> None:
+                 events: EventSink, workspace: Path, project_dir: Path | None = None,
+                 rng: random.Random | None = None, wait: Callable[[float], bool] | None = None) -> None:
         self._songs = songs
         self._media = media
         self._processor = processor
@@ -120,6 +139,11 @@ class Pipeline:
         self._errors = 0
         self._warnings = 0
         self._stop = threading.Event()
+        self._rng = rng or random.Random()
+        self._wait = wait or self._stop.wait
+        # Set when the media source limits the connection: no new look-ups or downloads
+        # start, running ones end, then the run stops (SPEC §9 stage 5).
+        self._limited = threading.Event()
 
     # -- stopping ----------------------------------------------------------
 
@@ -141,8 +165,35 @@ class Pipeline:
 
     def _pause(self, seconds: float) -> None:
         """Wait before a retry; a stop ends the wait at once."""
-        if self._stop.wait(seconds):
+        if self._wait(seconds) or self._stop.is_set():
             raise StoppedError(STOPPED_MESSAGE)
+
+    # -- rate limit ----------------------------------------------------------
+
+    def _halted(self) -> bool:
+        """True when no new look-up or download should start: stopped, or rate limited."""
+        return self._stop.is_set() or self._limited.is_set()
+
+    def _note_rate_limit(self, stage: str, error: RateLimitedError) -> None:
+        """Remember the rate limit. The first message is logged as it came; later ones add nothing."""
+        if not self._limited.is_set():
+            self._limited.set()
+            self._log(Level.WARNING, stage, f"YouTube is limiting this connection ({error}). "
+                      "Starting nothing new; letting running work finish.")
+
+    def _check_rate_limit(self, rows: list[SheetRow], kind: MediaKind, cache_dir: Path) -> None:
+        """End a rate-limited run, saying how much is cached, so the operator knows the
+        rerun will be quick (SPEC §9 stage 5)."""
+        if not self._limited.is_set():
+            return
+        cached = sum(1 for row in rows if self._cached_file(row.url, kind, cache_dir))
+        raise RateLimitedError(f"{RATE_LIMITED_MESSAGE}\n{cached} of {len(rows)} song(s) are downloaded "
+                               "and cached; the next run won't download or look them up again.")
+
+    def _cached_file(self, url: str, kind: MediaKind, cache_dir: Path) -> Path | None:
+        """The cached file for this URL and mode, found without asking the media source."""
+        media_id = self._media.media_id(url.strip()) if url.strip() else None
+        return find_cached(cache_dir, cache_stem(media_id, kind)) if media_id else None
 
     # -- logging helpers ---------------------------------------------------
 
@@ -208,19 +259,25 @@ class Pipeline:
 
         # Stage 3: prepare the countdown before the manifest on purpose: a run can't succeed
         # without it, so a bad one should stop the run before minutes of manifest look-ups.
-        countdown_segment = self._prepare_countdown(countdown, kind, cache_dir, settings)
+        try:
+            countdown_segment = self._prepare_countdown(countdown, kind, cache_dir, settings)
+        except RateLimitedError as e:
+            self._note_rate_limit("countdown", e)
         self._check_stop()
+        self._check_rate_limit(sheet_rows, kind, cache_dir)
 
-        # Stage 4: build the manifest (offline rules, then ask the media source).
-        entries = self._build_manifest(sheet_rows, settings.download)
+        # Stage 4: build the manifest (offline rules and cached files, then ask the media source).
+        entries = self._build_manifest(sheet_rows, settings.download, kind, cache_dir)
         self._check_stop()
+        self._check_rate_limit(sheet_rows, kind, cache_dir)
 
         # Stage 5: download songs (cached ones are skipped).
         paths = self._download_all(entries, kind, cache_dir, settings.download)
         self._check_stop()
+        self._check_rate_limit(sheet_rows, kind, cache_dir)
 
         # Stage 6: check real lengths and measure peaks.
-        songs = self._measure_songs(entries, paths, settings)
+        songs = self._measure_songs(entries, paths, settings, kind)
         if not songs:
             raise LarbError("No usable songs left, nothing to render. See the errors above.")
 
@@ -239,8 +296,11 @@ class Pipeline:
 
     # -- stage helpers ---------------------------------------------------------
 
-    def _build_manifest(self, rows: list[SheetRow], dl: DownloadSettings) -> list[ManifestEntry]:
-        """Check every row, looking videos up max_parallel_lookups at a time.
+    def _build_manifest(self, rows: list[SheetRow], dl: DownloadSettings, kind: MediaKind,
+                        cache_dir: Path) -> list[ManifestEntry]:
+        """Check every row, looking videos up max_parallel_lookups at a time. A row whose
+        file for this mode is already cached is checked from that file instead, without
+        asking the media source (SPEC §9 stage 4).
 
         Rows finish in any order, but their results, errors and warnings are
         reported in sheet order. A progress event goes out as each row finishes.
@@ -253,16 +313,16 @@ class Pipeline:
 
         def check(row: SheetRow) -> _RowCheck:
             nonlocal done
-            if self._stop.is_set():   # rows still waiting are never looked up
+            if self._halted():   # rows still waiting are never looked up
                 return _RowCheck(row.row_number)
-            result = self._check_row(row, dl.max_retries)
+            result = self._check_row(row, dl.max_retries, kind, cache_dir)
             with done_lock:   # also keeps the progress events in counting order
                 done += 1
                 self._log(Level.INFO, "manifest", f"checked {done}/{total}", row.row_number,
                           progress=(done, total))
             return result
 
-        entries = []
+        entries, from_cache = [], 0
         with ThreadPoolExecutor(max_workers=dl.max_parallel_lookups) as pool:
             # map() hands the results back in the order of `rows`, however they finish.
             for result in pool.map(check, rows):
@@ -270,12 +330,15 @@ class Pipeline:
                     self._log(level, "manifest", message, result.row_number)
                 if result.entry:
                     entries.append(result.entry)
-        self._log(Level.INFO, "manifest", f"{len(entries)} of {total} row(s) usable")
+                    from_cache += result.from_cache
+        self._log(Level.INFO, "manifest", f"{len(entries)} of {total} row(s) usable: {from_cache} "
+                  f"checked from the cache, {len(entries) - from_cache} looked up")
         return entries
 
-    def _check_row(self, row: SheetRow, max_retries: int) -> _RowCheck:
-        """Check one row: offline rules, then the media source. Runs in a worker thread,
-        so it logs nothing itself; its messages are reported later, in sheet order."""
+    def _check_row(self, row: SheetRow, max_retries: int, kind: MediaKind, cache_dir: Path) -> _RowCheck:
+        """Check one row: offline rules, then the cached file or the media source. Runs in
+        a worker thread, so it logs nothing itself; its messages are reported later, in
+        sheet order."""
         result = _RowCheck(row.row_number)
         try:
             parsed: ParsedRow = parse_row(row.row_number, row.song_title, row.artist,
@@ -284,12 +347,18 @@ class Pipeline:
             result.messages.append((Level.ERROR, f"skipped: {problem}"))
             return result
         result.messages += [(Level.WARNING, warning) for warning in parsed.warnings]
+        cached = self._cached_file(parsed.url, kind, cache_dir)
+        if cached:
+            return self._check_cached_row(parsed, cached, result)
         try:
             info = self._lookup_with_retries(
                 parsed.url, max_retries, lambda msg: result.messages.append((Level.WARNING, msg)))
         except MediaUnavailableError as e:
             result.messages.append((Level.ERROR, f"skipped: video unavailable: {e}"))
             return result
+        except RateLimitedError as e:
+            self._note_rate_limit("manifest", e)
+            return _RowCheck(row.row_number)   # not a row error: the whole run stops
         # YouTube rounds the length to whole seconds, so this catches most bad
         # ranges before downloading; stage 6 checks the real file again.
         if parsed.end_s > info.duration_s:
@@ -302,6 +371,26 @@ class Pipeline:
                                 f"{', already mirrored' if parsed.already_mirrored else ''})"))
         return result
 
+    def _check_cached_row(self, parsed: ParsedRow, cached: Path, result: _RowCheck) -> _RowCheck:
+        """A row whose file is cached: the file proves the video was available, and its
+        length is measured (exact). The end time isn't checked here: stage 6 applies the
+        usual rules to the exact length (trim within about 1 s, else a row error)."""
+        try:
+            # A tiny peak range keeps this fast; only the file's length is needed here.
+            length = self._processor.measure(cached, 0.0, 0.1).duration_s
+        except RenderError as e:
+            result.messages.append((Level.ERROR, f"skipped: can't read the cached file {cached.name}: {e}"))
+            return result
+        media_id = cached.stem.rsplit("_", 1)[0]   # "<id>_audio" / "<id>_v720" (cache.cache_stem)
+        result.entry = ManifestEntry(parsed.row_number, parsed.title, parsed.artist, parsed.url,
+                                     float(parsed.start_s), float(parsed.end_s), parsed.already_mirrored,
+                                     MediaInfo(media_id, "", length))
+        result.from_cache = True
+        result.messages.append((Level.INFO, f"ok: {result.entry.display_name} ({parsed.start_s}-{parsed.end_s} s"
+                                f"{', already mirrored' if parsed.already_mirrored else ''}; cached, "
+                                "not looked up)"))
+        return result
+
     def _lookup_with_retries(self, url: str, max_retries: int,
                              note_retry: Callable[[str], None]) -> MediaInfo:
         """Look one video up, retrying retryable errors up to max_retries times (the
@@ -309,6 +398,7 @@ class Pipeline:
 
         Raises:
             MediaUnavailableError: The last try failed, or the error isn't worth retrying.
+            RateLimitedError: The media source is limiting the connection (never retried).
         """
         for attempt in range(max_retries + 1):
             try:
@@ -316,8 +406,11 @@ class Pipeline:
             except MediaUnavailableError as e:
                 if attempt == max_retries or not e.retryable:
                     raise
-                note_retry(f"look-up retry {attempt + 1}/{max_retries}: {e}")
-                self._pause(RETRY_PAUSE_S * (attempt + 1))
+                wait = retry_wait_s(attempt, self._rng)
+                note_retry(f"look-up retry {attempt + 1}/{max_retries} in {wait:.1f} s: {e}")
+                self._pause(wait)
+                if self._limited.is_set():   # another worker hit the rate limit meanwhile
+                    raise RateLimitedError("not retried: the connection is being limited")
         raise AssertionError("unreachable: the loop always returns or raises")
 
     def _prepare_countdown(self, countdown: str, kind: MediaKind, cache_dir: Path,
@@ -334,11 +427,16 @@ class Pipeline:
             path = Path(countdown)
             if not path.is_file():
                 raise LarbError(f"Countdown file not found: {path}")
-        return self._check_countdown(path)
+        return self._check_countdown(path, kind)
 
     def _fetch_countdown(self, url: str, kind: MediaKind, cache_dir: Path, dl: DownloadSettings) -> Path:
         """A countdown URL goes through the media source like a song: same look-up,
-        same cache name, same retries. Only the failure differs: it stops the run."""
+        same cache name, same retries, and like a song it isn't looked up when it's
+        cached. Only the failure differs: it stops the run."""
+        cached = self._cached_file(url, kind, cache_dir)
+        if cached:
+            self._log(Level.INFO, "countdown", f"cached, not looked up: countdown ({cached.name})")
+            return cached
         try:
             info = self._lookup_with_retries(
                 url, dl.max_retries, lambda msg: self._log(Level.WARNING, "countdown", msg))
@@ -356,8 +454,12 @@ class Pipeline:
         except DownloadError as e:
             raise LarbError(f"Countdown download failed: {e}") from None
 
-    def _check_countdown(self, path: Path) -> Segment:
+    def _check_countdown(self, path: Path, kind: MediaKind) -> Segment:
         info = self._processor.measure(path, 0.0, None)
+        if not kind.audio_only and not info.has_video:
+            # The countdown is measured once per run, so this warns once (SPEC §9 stage 3).
+            self._log(Level.WARNING, "countdown", f"{path.name} has no picture: shown as a black "
+                      "screen, with its sound")
         # A short countdown only shortens the crossfades next to it (_build_plan);
         # below this it can't hold even a one-frame crossfade.
         if info.duration_s < MIN_CLIP_S:
@@ -366,7 +468,8 @@ class Pipeline:
         self._warn_short_streams(info, info.duration_s, "countdown", "countdown", None)
         gain = self._gain_for(info.peak_db, "countdown", None)
         self._log(Level.INFO, "countdown", f"{path.name}: {info.duration_s:.2f} s, gain {gain:+.1f} dB")
-        return Segment(path, 0.0, info.duration_s, mirror=False, gain_db=gain)  # countdowns never mirror
+        return Segment(path, 0.0, info.duration_s, mirror=False, gain_db=gain,   # countdowns never mirror
+                       has_video=info.has_video)
 
     def _download_all(self, entries, kind: MediaKind, cache_dir: Path, dl) -> dict[str, Path]:
         """Download each distinct video once. Returns media_id -> file for the ones that worked."""
@@ -391,9 +494,13 @@ class Pipeline:
 
             def download(entry: ManifestEntry) -> tuple[ManifestEntry, Path | None]:
                 nonlocal done
-                if self._stop.is_set():   # downloads still waiting never start
+                if self._halted():   # downloads still waiting never start
                     return entry, None
-                path = self._download_one(entry, kind, cache_dir, dl.max_retries)
+                try:
+                    path = self._download_one(entry, kind, cache_dir, dl.max_retries)
+                except RateLimitedError as e:
+                    self._note_rate_limit("download", e)
+                    return entry, None   # not a row error: the whole run stops
                 with done_lock:
                     done += 1
                     self._log(Level.DEBUG, "download", f"downloaded {done}/{total}", progress=(done, total))
@@ -428,6 +535,8 @@ class Pipeline:
         Raises:
             DownloadError: The last try failed, or the error isn't worth retrying.
             StoppedError: The run was stopped; what the download left behind is removed.
+            RateLimitedError: The media source is limiting the connection (never
+                retried); what the download left behind is removed.
         """
         self._log_activity(Activity(stem, name, started=True), row)
         try:
@@ -440,10 +549,14 @@ class Pipeline:
                 except DownloadError as e:
                     if attempt == max_retries or not e.retryable:
                         raise
-                    self._log(Level.WARNING, "download", f"retry {attempt + 1}/{max_retries}: {name}: {e}", row)
-                    self._pause(RETRY_PAUSE_S * (attempt + 1))
+                    wait = retry_wait_s(attempt, self._rng)
+                    self._log(Level.WARNING, "download", f"retry {attempt + 1}/{max_retries} in {wait:.1f} s: "
+                              f"{name}: {e}", row)
+                    self._pause(wait)
+                    if self._limited.is_set():   # another worker hit the rate limit meanwhile
+                        raise RateLimitedError("not retried: the connection is being limited")
             raise AssertionError("unreachable: the loop always returns or raises")
-        except StoppedError:
+        except (StoppedError, RateLimitedError):
             for path in remove_leftovers(cache_dir, stem):
                 self._log(Level.INFO, "download", f"removed unfinished download {path.name}", row)
             raise
@@ -457,8 +570,8 @@ class Pipeline:
         self._events.emit(LogEvent(Level.DEBUG, "download", f"{what}: {activity.label}", row,
                                    activity=activity))
 
-    def _measure_songs(self, entries, paths: dict[str, Path],
-                       settings: Settings) -> list[tuple[ManifestEntry, Segment]]:
+    def _measure_songs(self, entries, paths: dict[str, Path], settings: Settings,
+                       kind: MediaKind) -> list[tuple[ManifestEntry, Segment]]:
         segments = []
         todo = [entry for entry in entries if entry.media.media_id in paths]  # failed ones are reported
         for n, entry in enumerate(todo, 1):
@@ -496,9 +609,12 @@ class Pipeline:
                           f"shorter than {MIN_CLIP_S:.2f} s", entry.row_number)
                 continue
             self._warn_short_streams(info, end - start, "measure", entry.display_name, entry.row_number)
+            if not kind.audio_only and not info.has_video:
+                self._log(Level.WARNING, "measure", f"{entry.display_name}: {path.name} has no picture: "
+                          "shown as a black screen, with its sound", entry.row_number)
             mirror = settings.processing.mirror and not entry.already_mirrored  # SPEC §8 Mirror rule
             gain = self._gain_for(info.peak_db, "measure", entry.row_number)
-            segments.append((entry, Segment(path, start, end, mirror, gain)))
+            segments.append((entry, Segment(path, start, end, mirror, gain, has_video=info.has_video)))
             self._log(Level.DEBUG, "measure", f"{entry.display_name}: {start:.1f}-{end:.1f} s, "
                       f"peak {info.peak_db:.1f} dB -> gain {gain:+.1f} dB, mirror {mirror}", entry.row_number)
         return segments

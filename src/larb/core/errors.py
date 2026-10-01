@@ -47,6 +47,12 @@ class DownloadError(LarbError):
         self.retryable = retryable
 
 
+class RateLimitedError(LarbError):
+    """The media source is limiting this connection (YouTube: "Sign in to confirm you're
+    not a bot", HTTP 429). Never retried: asking again soon makes it worse. The run
+    starts no new look-ups or downloads, lets running ones end, and stops (SPEC §9 stage 5)."""
+
+
 class MediaToolMissingError(LarbError):
     """The media tool (FFmpeg) can't be found. Aborts the run."""
 

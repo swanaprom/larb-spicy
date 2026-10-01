@@ -18,7 +18,8 @@ QUIT_GRACE_S = 5.0        # after "q", how long FFmpeg gets to close its output 
 
 
 def run_tool(binary: Path, args: list[str], on_command: Callable[[str], None] | None = None,
-             check: bool = True, stop: threading.Event | None = None) -> subprocess.CompletedProcess:
+             check: bool = True, stop: threading.Event | None = None,
+             on_progress: Callable[[float], None] | None = None) -> subprocess.CompletedProcess:
     """Run FFmpeg or ffprobe and return the finished process (stdout/stderr as text).
 
     Args:
@@ -30,6 +31,9 @@ def run_tool(binary: Path, args: list[str], on_command: Callable[[str], None] | 
         stop: When set, the tool is asked to quit ("q" on its input, which lets FFmpeg
             close its output file properly), and killed if it's still running after
             QUIT_GRACE_S. Set before the call, the tool isn't started at all.
+        on_progress: Called with the seconds of output written so far, as FFmpeg
+            reports them (about twice a second). Only works when `args` include
+            "-progress pipe:1", which puts those reports on stdout.
 
     Raises:
         MediaToolMissingError: The binary can't be started.
@@ -53,8 +57,8 @@ def run_tool(binary: Path, args: list[str], on_command: Callable[[str], None] | 
     # (communicate() would close stdin, and "q" couldn't be sent any more.)
     out: list[str] = []
     err: list[str] = []
-    readers = [threading.Thread(target=lambda s=s, into=into: into.append(s.read()), daemon=True)
-               for s, into in ((proc.stdout, out), (proc.stderr, err))]
+    readers = [threading.Thread(target=_read_stdout, args=(proc.stdout, out, on_progress), daemon=True),
+               threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True)]
     for reader in readers:
         reader.start()
 
@@ -83,6 +87,17 @@ def run_tool(binary: Path, args: list[str], on_command: Callable[[str], None] | 
         tail = result.stderr[-STDERR_TAIL_CHARS:].strip()
         raise RenderError(f"{Path(binary).name} failed (exit code {result.returncode}):\n{tail}")
     return result
+
+
+def _read_stdout(stream, into: list[str], on_progress: Callable[[float], None] | None) -> None:
+    """Collect stdout line by line, passing each "out_time_us=" report on as it arrives."""
+    for line in stream:
+        into.append(line)
+        if on_progress and line.startswith("out_time_us="):
+            try:   # "N/A" before anything is written
+                on_progress(int(line.split("=", 1)[1]) / 1_000_000)
+            except ValueError:
+                pass
 
 
 def _ask_to_quit(proc: subprocess.Popen) -> None:

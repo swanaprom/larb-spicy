@@ -105,7 +105,8 @@ class FfmpegProcessor(MediaProcessor):
         peak = float(match.group(1)) if match else float("-inf")
         return ClipInfo(duration_s=duration, peak_db=peak,
                         audio_s=_decoded_audio_s(result.stdout, audio is not None),
-                        video_s=_video_in_range_s(video, start_s, range_end))
+                        video_s=_video_in_range_s(video, start_s, range_end),
+                        has_video=video is not None)
 
     # -- rendering ---------------------------------------------------------------
 
@@ -113,13 +114,17 @@ class FfmpegProcessor(MediaProcessor):
         # Straight to output_path: the core picks a temporary name and renames the
         # file only after checking it. A failed run leaves its partial file for the
         # core to name, and its graph file in work_dir for debugging.
+        progress = _RenderProgress(self._events, plan.expected_duration_s)
         if plan.audio_only:
-            self._run_pass(plan, output_path, audio=True, video=False)   # one pass: fast and small
+            # One pass: fast and small.
+            self._run_pass(plan, output_path, audio=True, video=False, on_progress=progress.written)
         else:
-            self._render_video(plan, output_path)
+            self._render_video(plan, output_path, progress)
+        # FFmpeg's last report can be a few ms short of the end; the whole plan is written now.
+        progress.written(plan.expected_duration_s)
         return output_path
 
-    def _render_video(self, plan: RenderPlan, output_path: Path) -> None:
+    def _render_video(self, plan: RenderPlan, output_path: Path, progress: "_RenderProgress") -> None:
         """Video in fixed chunks, audio in one pass, then joined without re-encoding
         (TECH §10 method C, §16). Used for every video run, however short, so there is
         one code path: in one pass, FFmpeg's memory grows with every song (TECH §14)."""
@@ -135,12 +140,19 @@ class FfmpegProcessor(MediaProcessor):
             # CPU or memory, and one after the other cost ~15% more time (TECH §16).
             with ThreadPoolExecutor(max_workers=1) as audio_worker:
                 audio_done = audio_worker.submit(self._run_pass, plan, audio_file, audio=True, video=False)
+                # Progress follows the video parts, which take nearly all the time; the
+                # audio pass beside them isn't counted.
+                written = 0.0
                 for n, (chunk, chunk_file) in enumerate(zip(chunks, chunk_files), 1):
-                    self._run_pass(chunk, chunk_file, audio=False, video=True)
+                    self._run_pass(chunk, chunk_file, audio=False, video=True,
+                                   on_progress=lambda s, before=written: progress.written(before + s))
+                    written += chunk.expected_duration_s
+                    # No progress numbers for the check: the GUI's bar sweeps meanwhile.
+                    self._events.emit(LogEvent(Level.INFO, "render", f"video part {n}/{len(chunks)} written; "
+                                               "checking it"))
                     self._check_frames(chunk_file, chunk, f"video part {n}")
-                    self._events.emit(LogEvent(Level.INFO, "render", f"video part {n}/{len(chunks)} done",
-                                               progress=(n, len(chunks))))
                 audio_done.result()   # raises the audio pass's error, if it had one
+            self._events.emit(LogEvent(Level.INFO, "render", "joining the video parts and the audio"))
             # Concat list: one "file '<path>'" line per chunk; a ' inside a path is written '\''.
             quote = "'\\''"
             list_file.write_text("".join(f"file '{str(f).replace(chr(39), quote)}'\n" for f in chunk_files),
@@ -155,28 +167,41 @@ class FfmpegProcessor(MediaProcessor):
             for f in (audio_file, list_file, *chunk_files):
                 f.unlink(missing_ok=True)
 
-    def _run_pass(self, plan: RenderPlan, out: Path, audio: bool, video: bool) -> None:
+    def _run_pass(self, plan: RenderPlan, out: Path, audio: bool, video: bool,
+                  on_progress=None) -> None:
         """One FFmpeg run: trim, format, crossfade and fade the plan's segments into `out`.
-        Audio goes to .mp3 on its own (audio-only mode), else AAC."""
+        Audio goes to .mp3 on its own (audio-only mode), else AAC.
+
+        Args:
+            on_progress: Called with the seconds of `out` written so far.
+        """
         args = ["-hide_banner", "-nostats", "-y"]
-        for seg in plan.segments:
+        inputs: dict[int, int] = {}   # segment -> its input number
+        for i, seg in enumerate(plan.segments):
+            if not audio and not seg.has_video:
+                continue   # a video-only pass draws black for it: nothing to read
+            inputs[i] = len(inputs)
             # Input-side seek + length: exact because we re-encode, and avoids decoding whole
             # songs. -an / -vn: leave out the stream this pass doesn't use.
             args += ["-ss", f"{seg.start_s:.6f}", "-t", f"{seg.duration_s:.6f}", *DECODER_ARGS,
-                     *([] if audio else ["-an"]), *([] if video else ["-vn"]), "-i", str(seg.path)]
+                     *([] if audio else ["-an"]),
+                     *([] if video and seg.has_video else ["-vn"]), "-i", str(seg.path)]
 
         # The graph goes in a file: on the command line it would pass Windows'
         # 32,767-character limit at around 50 songs (TECH §3). "-/option <file>" reads the
         # option's value from a file (FFmpeg 7.1+, guaranteed by locate.MIN_VERSION).
         graph_file = self._work_dir / f"{out.stem}.graph.txt"
-        graph_file.write_text(_graph(plan, audio, video), encoding="utf-8")
+        graph_file.write_text(_graph(plan, audio, video, inputs), encoding="utf-8")
         args += ["-/filter_complex", str(graph_file)]
         if video:
             args += ["-map", "[vout]", "-frames:v", str(frames_for(plan.expected_duration_s)), *VIDEO_ARGS]
         if audio:
             args += ["-map", "[aout]", *(MP3_ARGS if out.suffix == ".mp3" else VIDEO_AUDIO_ARGS)]
+        if on_progress:
+            args += ["-progress", "pipe:1"]   # "out_time_us=" reports on stdout (helper.run_tool)
         try:
-            run_tool(self._tools.ffmpeg, [*args, str(out)], self._log_command, stop=self._stop)
+            run_tool(self._tools.ffmpeg, [*args, str(out)], self._log_command, stop=self._stop,
+                     on_progress=on_progress)
         except StoppedError:
             graph_file.unlink(missing_ok=True)   # a stop isn't a failure: nothing to debug
             raise
@@ -197,6 +222,37 @@ class FfmpegProcessor(MediaProcessor):
         if frames != planned:
             raise RenderError(f"The {what} has {frames} frames but should have {planned} "
                               f"({plan.expected_duration_s:.3f} s at {FPS} fps)")
+
+
+class _RenderProgress:
+    """Reports how much of the planned output is written, as LogEvent.progress =
+    (done, total) in milliseconds of output (SPEC §9 stage 7).
+
+    DEBUG at most once per whole percent (the GUI's bar; the log file keeps them),
+    INFO once per 10 % (the terminal's one line every 10 %, also in the GUI's log).
+    Safe to call from FFmpeg's reader threads.
+    """
+
+    def __init__(self, events: EventSink, total_s: float) -> None:
+        self._events = events
+        self._total_ms = max(1, round(total_s * 1000))
+        self._percent = 0
+        self._lock = threading.Lock()
+
+    def written(self, seconds: float) -> None:
+        done = min(self._total_ms, max(0, round(seconds * 1000)))
+        percent = done * 100 // self._total_ms
+        with self._lock:
+            if percent <= self._percent:
+                return
+            tenth_passed = percent // 10 > self._percent // 10
+            self._percent = percent
+        if tenth_passed:
+            self._events.emit(LogEvent(Level.INFO, "render", f"rendered {percent // 10 * 10}%",
+                                       progress=(done, self._total_ms)))
+        else:
+            self._events.emit(LogEvent(Level.DEBUG, "render", f"rendered {percent}%",
+                                       progress=(done, self._total_ms)))
 
 
 def _decoded_audio_s(progress_log: str, has_audio: bool) -> float | None:
@@ -228,8 +284,13 @@ def frames_for(seconds: float) -> int:
     return round(seconds * FPS)
 
 
-def _graph(plan: RenderPlan, audio: bool, video: bool) -> str:
-    """The filter graph for the plan's audio and/or video (TECH §10 recipe)."""
+def _graph(plan: RenderPlan, audio: bool, video: bool, inputs: dict[int, int]) -> str:
+    """The filter graph for the plan's audio and/or video (TECH §10 recipe).
+
+    Args:
+        inputs: segment number -> its FFmpeg input number. A segment without a
+            picture has no input in a video-only pass.
+    """
     lines = []
     h, w = plan.height, _width_for(plan.height)
     for i, seg in enumerate(plan.segments):
@@ -240,16 +301,21 @@ def _graph(plan: RenderPlan, audio: bool, video: bool) -> str:
             # apad + atrim: exactly the planned length, padded with silence or cut. An
             # Opus file's container reports a few ms more than decodes (TECH §16), which
             # added up over a long list; any other source a few ms off is covered too.
-            lines.append(f"[{i}:a]volume={seg.gain_db:.2f}dB,aresample={AUDIO_RATE},"
+            lines.append(f"[{inputs[i]}:a]volume={seg.gain_db:.2f}dB,aresample={AUDIO_RATE},"
                          f"aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS,"
                          f"apad=whole_dur={dur},atrim=duration={dur}[a{i}]")
         if video:
             # tpad + trim: exactly the planned length, repeating the last frame when the
             # video stream is shorter than the file (TECH §16), as apad does for audio.
-            flip = ",hflip" if seg.mirror else ""
-            lines.append(f"[{i}:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
-                         f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS},format=yuv420p"
-                         f"{flip},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={dur},"
+            # No picture (e.g. an .mp3, cover art included): a black screen of the same
+            # length; nothing else is drawn (SPEC §9 stage 3).
+            if seg.has_video:
+                flip = ",hflip" if seg.mirror else ""
+                source = (f"[{inputs[i]}:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                          f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS},format=yuv420p{flip}")
+            else:
+                source = f"color=c=black:s={w}x{h}:r={FPS}:d={dur},setsar=1,format=yuv420p"
+            lines.append(f"{source},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={dur},"
                          f"trim=duration={dur}[v{i}]")
     # acrossfade needs no lengths; xfade needs the offset of each join,
     # which is why every segment's length must be known up front.

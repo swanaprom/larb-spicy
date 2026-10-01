@@ -14,8 +14,9 @@ import time
 from pathlib import Path
 
 import yt_dlp
+from yt_dlp.extractor.youtube import YoutubeIE
 
-from larb.core.errors import DownloadError, MediaUnavailableError, StoppedError
+from larb.core.errors import DownloadError, MediaUnavailableError, RateLimitedError, StoppedError
 from larb.core.models import Level, LogEvent, MediaInfo, MediaKind
 from larb.core.ports import EventSink, MediaSource
 
@@ -38,9 +39,20 @@ _UNUSED_INFO_KEYS = ("automatic_captions", "subtitles", "heatmap")
 _MAX_REDIRECTS = 3
 
 
+# Messages that mean YouTube is limiting this connection (TECH §16, §20). Retrying soon
+# makes it worse, so these become RateLimitedError, never a retryable error.
+_RATE_LIMIT_MARKERS = ("confirm you're not a bot", "confirm you’re not a bot", "http error 429",
+                       "too many requests")
+
+
 def _is_permanent(message: str) -> bool:
     lowered = message.lower()
     return any(marker in lowered for marker in _PERMANENT_MARKERS)
+
+
+def _is_rate_limit(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
 
 
 class _SilentLogger:
@@ -104,6 +116,15 @@ class YtDlpMediaSource(MediaSource):
     def _log(self, level: Level, message: str) -> None:
         self._events.emit(LogEvent(level, "media", message))
 
+    def media_id(self, url: str) -> str | None:
+        # yt-dlp's own URL pattern for YouTube videos, no request: watch?v=, youtu.be/,
+        # /shorts/, music.youtube.com, and "&list=..." links (noplaylist gives the video
+        # itself, the same ID lookup() returns). Anything else: None, so it's looked up.
+        try:
+            return YoutubeIE.get_temp_id(url)
+        except Exception:   # a yt-dlp update changed it: looking up still works
+            return None
+
     def lookup(self, url: str) -> MediaInfo:
         self._raise_if_stopped()
         started = time.perf_counter()
@@ -121,6 +142,8 @@ class YtDlpMediaSource(MediaSource):
                                             ie_key=info.get("ie_key"))
         except yt_dlp.utils.DownloadError as e:
             message = _clean(e)
+            if _is_rate_limit(message):
+                raise RateLimitedError(message) from None
             raise MediaUnavailableError(message, retryable=not _is_permanent(message)) from None
         if not info or info.get("_type") not in (None, "video"):
             raise MediaUnavailableError(f"{url} is not a single video")
@@ -185,6 +208,8 @@ class YtDlpMediaSource(MediaSource):
             if not isinstance(e, yt_dlp.utils.DownloadError):
                 raise
             message = _clean(e)
+            if _is_rate_limit(message):
+                raise RateLimitedError(message) from None
             raise DownloadError(message, retryable=not _is_permanent(message)) from None
         try:
             path = Path(info["requested_downloads"][0]["filepath"])

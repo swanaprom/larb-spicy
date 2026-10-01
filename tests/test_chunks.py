@@ -88,8 +88,20 @@ class ChunkedRenderTest(PipelineTestCase):
         lengths = self.stream_lengths(result.output_path)
         self.assertAlmostEqual(lengths["video"], expected, delta=FRAME)
         self.assertAlmostEqual(lengths["audio"], lengths["video"], delta=FRAME)
-        parts = [e.progress for e in self.sink.events if e.stage == "render" and e.progress]
-        self.assertEqual(parts, [(1, 3), (2, 3), (3, 3)])
+        # Progress: milliseconds of planned output written, rising across all 3 parts to the total.
+        progress = [e.progress for e in self.sink.events if e.stage == "render" and e.progress]
+        planned_ms = expected * 1000
+        self.assertTrue(all(abs(t - planned_ms) <= 50 for _, t in progress), msg=progress[:3])
+        done = [d for d, _ in progress]
+        self.assertEqual(done, sorted(set(done)), msg="rising, never repeated")
+        self.assertGreaterEqual(len(done), 3, msg="at least one report per part")
+        self.assertEqual(progress[-1][0], progress[-1][1], msg="ends at its total")
+        self.assertTrue(any(e.message.startswith("video part 2/3") for e in self.sink.events))
+        # The terminal's one line per 10 %: INFO, at most 10 of them.
+        tenths = [e.message for e in self.sink.events if e.stage == "render" and e.progress
+                  and e.level is Level.INFO]
+        self.assertLessEqual(len(tenths), 10)
+        self.assertEqual(tenths[-1], "rendered 100%")
         self.assertEqual(list((self.workspace / "tmp").iterdir()), [])   # chunks and graphs cleaned up
         self.assertFalse([m for m in self.sink.messages(Level.WARNING) if "shortened" in m])
 

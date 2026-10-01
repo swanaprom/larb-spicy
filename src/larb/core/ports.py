@@ -52,6 +52,15 @@ class MediaSource(ABC):
     """Looks up and downloads videos."""
 
     @abstractmethod
+    def media_id(self, url: str) -> str | None:
+        """Return the video's stable ID (the same as lookup() would give) from the URL
+        alone, without contacting the source. None if the URL alone can't tell.
+
+        Lets the core find a cached file before asking the source (SPEC §9 stage 4).
+        Must be safe to call from several threads at once.
+        """
+
+    @abstractmethod
     def lookup(self, url: str) -> MediaInfo:
         """Return the video's ID, title and (rounded) length, without downloading it.
 
@@ -60,6 +69,7 @@ class MediaSource(ABC):
         Raises:
             MediaUnavailableError: The video doesn't exist or can't be accessed.
                 Its `retryable` flag says whether trying again might help.
+            RateLimitedError: The source is limiting this connection.
         """
 
     @abstractmethod
@@ -74,6 +84,7 @@ class MediaSource(ABC):
         Raises:
             DownloadError: The download failed. Its `retryable` flag says whether
                 trying again might help.
+            RateLimitedError: The source is limiting this connection.
             StoppedError: cancel() was called. Leftover pieces of this download
                 may remain in dest_dir, named <stem>.*; the caller removes them.
         """

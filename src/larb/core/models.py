@@ -134,23 +134,32 @@ class ClipInfo:
         video_s: Seconds of video within the measured range. None = no video, or
             not known. The renderer pads a short stream (silence, or the last
             frame repeated); the core warns when that would hide a real gap.
+        has_video: Whether the file has a picture. A cover image (e.g. in an MP3)
+            doesn't count: such a clip is shown as a black screen in video mode.
     """
 
     duration_s: float
     peak_db: float
     audio_s: float | None = None
     video_s: float | None = None
+    has_video: bool = True
 
 
 @dataclass(frozen=True)
 class Segment:
-    """One piece of the final output: a countdown or a trimmed song."""
+    """One piece of the final output: a countdown or a trimmed song.
+
+    Attributes:
+        has_video: False = the file has no picture; in video mode the renderer shows a
+            black screen for the segment's length (the core decides and warns).
+    """
 
     path: Path
     start_s: float
     end_s: float
     mirror: bool
     gain_db: float
+    has_video: bool = True
 
     @property
     def duration_s(self) -> float:

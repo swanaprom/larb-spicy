@@ -18,7 +18,8 @@ if str(ROOT / "src") not in sys.path:
 
 from larb.adapters.ffmpeg.locate import find_ffmpeg  # noqa: E402
 from larb.adapters.ffmpeg.processor import FfmpegProcessor  # noqa: E402
-from larb.core.errors import DownloadError, MediaUnavailableError, StoppedError  # noqa: E402
+from larb.core.errors import (DownloadError, MediaUnavailableError, RateLimitedError,  # noqa: E402
+                              StoppedError)
 from larb.core.models import MediaInfo, SheetRow  # noqa: E402
 from larb.core.pipeline import Pipeline  # noqa: E402
 from larb.core.ports import EventSink, MediaSource, SongListSource  # noqa: E402
@@ -51,10 +52,15 @@ class FakeMedia(MediaSource):
         lookup_fail_first: urls whose first look-up fails with a retryable error.
         hang_until_cancel: urls whose download writes a partial file, then waits
             for cancel() and raises StoppedError (like an interrupted download).
+        rate_limited_lookups / rate_limited_downloads: urls whose look-up / download
+            raises RateLimitedError (YouTube's bot check).
+        download_delays: url -> seconds its download takes.
+        knows_ids: False = media_id() can't tell any ID (every row is looked up).
     """
 
     def __init__(self, table, fail_first=(), always_fail=(), lookup_delays=None, lookup_fail_first=(),
-                 hang_until_cancel=()):
+                 hang_until_cancel=(), rate_limited_lookups=(), rate_limited_downloads=(),
+                 download_delays=None, knows_ids=True):
         self.table = table
         self.downloads = 0
         self.lookups = 0
@@ -66,12 +72,21 @@ class FakeMedia(MediaSource):
         self._lookup_delays = lookup_delays or {}
         self._lookup_fail_first = set(lookup_fail_first)
         self._hang = set(hang_until_cancel)
+        self._limited_lookups = set(rate_limited_lookups)
+        self._limited_downloads = set(rate_limited_downloads)
+        self._download_delays = download_delays or {}
+        self._knows_ids = knows_ids
         self.cancelled = threading.Event()
         self.download_started = threading.Event()   # set when any download begins
         self.lookup_urls = []                       # every url looked up, in call order
+        self.download_urls = []                     # every download started, in call order
 
     def cancel(self):
         self.cancelled.set()
+
+    def media_id(self, url):
+        # The same ID lookup() gives, like the real adapter's URL pattern.
+        return url.split("//")[-1] if self._knows_ids and "//" in url else None
 
     def lookup(self, url):
         if self.cancelled.is_set():
@@ -87,6 +102,8 @@ class FakeMedia(MediaSource):
             time.sleep(self._lookup_delays.get(url, 0.0))
             if fail_now:
                 raise MediaUnavailableError(f"{url}: connection reset", retryable=True)
+            if url in self._limited_lookups:
+                raise RateLimitedError("Sign in to confirm you're not a bot")
             if url not in self.table:
                 raise MediaUnavailableError(f"{url}: This video is unavailable")
             path, length = self.table[url]
@@ -99,6 +116,11 @@ class FakeMedia(MediaSource):
         if self.cancelled.is_set():
             raise StoppedError("Stopped")
         self.download_started.set()
+        with self._lock:
+            self.download_urls.append(url)
+        time.sleep(self._download_delays.get(url, 0.0))
+        if url in self._limited_downloads:
+            raise RateLimitedError("HTTP Error 429: Too Many Requests")
         if url in self._hang:
             (dest_dir / f"{stem}.webm.part").write_bytes(b"half a song")
             if not self.cancelled.wait(10):   # never cancelled: fail differently, so a test notices
@@ -151,7 +173,9 @@ class PipelineTestCase(unittest.TestCase):
     def real_length(self, path):
         return self.processor.measure(path, 0.0, 0.1).duration_s
 
-    def run_pipeline(self, rows, media, countdown, settings, row_range=None):
-        pipeline = Pipeline(FakeSongs(rows), media, self.processor, self.sink, self.workspace)
+    def run_pipeline(self, rows, media, countdown, settings, row_range=None, **pipeline_options):
+        """pipeline_options: e.g. rng= and wait= (Pipeline's retry-wait hooks)."""
+        pipeline = Pipeline(FakeSongs(rows), media, self.processor, self.sink, self.workspace,
+                            **pipeline_options)
         return pipeline.run("fake-sheet", str(countdown), settings, rows=row_range,
                             now=datetime(2026, 9, 27, 14, 30, 12))

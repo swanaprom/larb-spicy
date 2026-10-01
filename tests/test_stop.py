@@ -110,7 +110,7 @@ class StopTest(PipelineTestCase):
     def test_during_a_retry_pause(self):
         media = FakeMedia({"fx://a": (XG, 189.0)}, always_fail={"fx://a"})
         settings = Settings(processing=ProcessingSettings(audio_only=True),
-                            download=DownloadSettings(max_retries=5))   # pauses of 1, 2, 3 ... s
+                            download=DownloadSettings(max_retries=5))   # pauses of about 2, 4, 8 ... s
         pipeline = self.pipeline([row(2, "fx://a", "0:10-0:20")], media)
         run = RunInThread(pipeline, CD_MP3, settings)
         wait_for(lambda: self.sink.messages(Level.WARNING), "the first retry")
@@ -133,7 +133,7 @@ class StopTest(PipelineTestCase):
         class StopAfterFirstChunk(RecordingSink):
             def emit(self, event):
                 super().emit(event)
-                if event.stage == "render" and event.progress == (1, 3):
+                if event.stage == "render" and event.message.startswith("video part 1/3"):
                     stopped_at.append(time.monotonic())
                     pipeline.stop()
 

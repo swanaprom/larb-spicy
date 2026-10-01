@@ -15,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fakes import ROOT, RecordingSink  # noqa: E402
 from larb.adapters import ytdlp_media  # noqa: E402
-from larb.core.errors import DownloadError, MediaUnavailableError, StoppedError  # noqa: E402
+from larb.core.errors import (DownloadError, MediaUnavailableError, RateLimitedError,  # noqa: E402
+                              StoppedError)
 from larb.core.models import Level, MediaKind  # noqa: E402
 
 VIDEO = "https://www.youtube.com/watch?v=abcdefghijk"
@@ -152,6 +153,42 @@ class YtDlpReuseTest(unittest.TestCase):
         with self.assertRaises(MediaUnavailableError) as caught:
             self.source.lookup(VIDEO)
         self.assertTrue(caught.exception.retryable)
+
+
+class YtDlpLimitsTest(unittest.TestCase):
+    """Slice 6: the bot check / HTTP 429 is never retried, and media_id needs no request."""
+
+    setUp = YtDlpReuseTest.setUp
+    tearDown = YtDlpReuseTest.tearDown
+    download = YtDlpReuseTest.download
+
+    def test_bot_check_and_429_are_rate_limits(self):
+        for message in ("ERROR: [youtube] abcdefghijk: Sign in to confirm you're not a bot. Use "
+                        "--cookies-from-browser or --cookies for the authentication.",
+                        "ERROR: Unable to download webpage: HTTP Error 429: Too Many Requests"):
+            FakeYoutubeDL.lookup_error = message
+            with self.assertRaises(RateLimitedError):
+                self.source.lookup(VIDEO)
+            with self.assertRaises(RateLimitedError):
+                self.download()   # no remembered info: the fresh look-up hits the same answer
+
+    def test_rate_limit_with_reused_info_is_not_looked_up_again(self):
+        self.source.lookup(VIDEO)
+        FakeYoutubeDL.reuse_error = "ERROR: unable to download video data: HTTP Error 429: Too Many Requests"
+        with self.assertRaises(RateLimitedError):
+            self.download()
+        self.assertEqual([c[0] for c in FakeYoutubeDL.calls], ["extract", "reuse"])
+
+    def test_media_id_from_the_url_alone(self):
+        for url in (VIDEO, WITH_LIST, "https://youtu.be/abcdefghijk?si=x1y2",
+                    "https://music.youtube.com/watch?v=abcdefghijk&feature=share",
+                    "https://www.youtube.com/shorts/abcdefghijk",
+                    "https://www.youtube.com/watch?app=desktop&v=abcdefghijk"):
+            self.assertEqual(self.source.media_id(url), "abcdefghijk", msg=url)
+        for url in ("https://www.youtube.com/watch?v=abcdefg",           # truncated: look it up
+                    "https://www.youtube.com/playlist?list=PL123", "https://example.com/a.mp4", "abc"):
+            self.assertIsNone(self.source.media_id(url), msg=url)
+        self.assertEqual(FakeYoutubeDL.calls, [])   # no request
 
 
 class YtDlpCancelTest(unittest.TestCase):
