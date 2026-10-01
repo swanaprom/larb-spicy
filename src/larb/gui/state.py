@@ -109,10 +109,11 @@ def shown_folder(text: str, default_name: str, project_dir: Path, workspace: Pat
 # Progress label and bar
 # ---------------------------------------------------------------------------
 
-# Stage -> label words while counting (LogEvent.progress).
-_COUNTED = {"manifest": "Checking", "download": "Downloading", "measure": "Measuring",
-            "render": "Rendering part"}
-# Stage -> label when a stage starts without a count.
+# Stage -> label words while counting (LogEvent.progress), e.g. "Checking 12 / 40".
+_COUNTED = {"manifest": "Checking", "download": "Downloading", "measure": "Measuring"}
+# Render progress is milliseconds of output written, shown as a percentage.
+_PERCENT = {"render": "Rendering"}
+# Stage -> label for a step without numbers (an INFO event without progress).
 _UNCOUNTED = {"sheet": "Reading the sheet", "countdown": "Preparing the countdown",
               "render": "Rendering"}
 
@@ -120,25 +121,33 @@ _UNCOUNTED = {"sheet": "Reading the sheet", "countdown": "Preparing the countdow
 @dataclass
 class ProgressView:
     """The overall bar and its label (GUI.md 2.3): follows the run stage by stage,
-    then says how it ended."""
+    then says how it ended.
+
+    The bar is never empty and still: `fraction` None means a step without numbers
+    (or nothing done yet), and the window shows a sweeping bar for it.
+    """
 
     text: str = ""
-    fraction: float = 0.0
+    fraction: float | None = None
     failed: bool = False   # "Stopped: ..." is shown in RED
 
     def start(self) -> None:
-        self.text, self.fraction, self.failed = "Starting", 0.0, False
+        self.text, self.fraction, self.failed = "Starting", None, False
 
     def update(self, event: LogEvent) -> None:
-        if event.progress is not None and event.stage in _COUNTED:
+        if event.progress is not None and (event.stage in _COUNTED or event.stage in _PERCENT):
             done, total = event.progress
-            self.text = f"{_COUNTED[event.stage]} {done} / {total}"
-            self.fraction = done / total if total else 0.0
+            if event.stage in _PERCENT:
+                percent = done * 100 // total if total else 0
+                self.text = f"{_PERCENT[event.stage]} {percent}%"
+            else:
+                self.text = f"{_COUNTED[event.stage]} {done} / {total}"
+            self.fraction = done / total if done and total else None   # 0 done: sweep, not an empty bar
         elif event.stage in _UNCOUNTED and event.level is Level.INFO:
-            if event.stage == "render" and self.text.startswith(_COUNTED["render"]):
-                return   # "Rendering part 3 / 7" stays until the next part
-            if self.text != _UNCOUNTED[event.stage]:
-                self.text, self.fraction = _UNCOUNTED[event.stage], 0.0
+            self.text, self.fraction = _UNCOUNTED[event.stage], None
+
+    def stopping(self) -> None:
+        self.text, self.fraction = "Stopping...", None
 
     def finish(self, error: Exception | None) -> None:
         if error is None:
@@ -252,6 +261,16 @@ def cache_reminder(files: int, n_bytes: int) -> str | None:
 
 def clear_cache_question(files: int, n_bytes: int) -> str:
     return f"Delete {files} downloaded file(s) ({size_text(n_bytes)})?"
+
+
+def open_failure_message(path: Path, is_folder: bool, reason: str) -> str:
+    """The pop-up (and log warning) when Open file / Open folder fails (GUI.md 2.4)."""
+    if not path.exists():
+        return f"{path} isn't there any more (moved or deleted?)."
+    if is_folder:
+        return f"The folder can't be opened ({reason}):\n{path}"
+    return (f"No app is set to open {path.suffix} files. Install a media player, or use Open folder.\n"
+            f"({reason})")
 
 
 def bottom_row(mac: bool) -> list[str]:

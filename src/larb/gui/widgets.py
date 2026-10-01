@@ -178,6 +178,61 @@ class SweepBar(tk.Canvas):
         super().destroy()
 
 
+class OverallBar(tk.Canvas):
+    """The overall progress bar (GUI.md 2.3): NEON filling up to a known fraction, or,
+    for a step without numbers, the same sweeping gradient as a download line. So it's
+    never empty and still. Stretches with the window."""
+
+    STEP_MS = SweepBar.STEP_MS
+    STRIPES = SweepBar.STRIPES
+
+    def __init__(self, master, height: int = 14) -> None:
+        super().__init__(master, height=height, bg=theme.BAR_TROUGH, highlightthickness=0)
+        self._height = height
+        self._fraction: float | None = 0.0
+        self._x = 0.0
+        self._job = None
+        self.bind("<Configure>", lambda _event: self._draw())
+
+    def set(self, fraction: float | None) -> None:
+        """A fraction from 0 to 1 fills the bar; None sweeps."""
+        self._fraction = fraction
+        if fraction is None and self._job is None:
+            self._x = -self.winfo_width() / 3
+            self._job = self.after(self.STEP_MS, self._step)
+        elif fraction is not None and self._job is not None:
+            self.after_cancel(self._job)
+            self._job = None
+        self._draw()
+
+    def _step(self) -> None:
+        width = self.winfo_width()
+        self._x += max(2, width // 60)
+        if self._x > width:
+            self._x = -width / 3
+        self._draw()
+        self._job = self.after(self.STEP_MS, self._step)
+
+    def _draw(self) -> None:
+        self.delete("all")
+        width, h = self.winfo_width(), self._height
+        if self._fraction is not None:
+            if self._fraction > 0:
+                self.create_rectangle(0, 0, width * min(self._fraction, 1.0), h, width=0, fill=theme.NEON)
+            return
+        block = width / 3
+        stripe = block / self.STRIPES
+        for i in range(self.STRIPES):
+            t = 1 - abs(2 * i / (self.STRIPES - 1) - 1)   # 0 -> 1 -> 0 across the block
+            x = self._x + i * stripe
+            self.create_rectangle(x, 0, x + stripe + 1, h, width=0, fill=theme.mix(theme.DARK, theme.NEON, t))
+
+    def destroy(self) -> None:
+        if self._job is not None:
+            self.after_cancel(self._job)
+        super().destroy()
+
+
 def ask(parent: tk.Misc, title: str, message: str, buttons: list[tuple[str, str]], default: str,
         colours: dict[str, str] | None = None, fonts=None, escape: str | None = None) -> str:
     """A modal dialog in the window's dark theme, with the buttons GUI.md names.

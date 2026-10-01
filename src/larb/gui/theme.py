@@ -92,8 +92,6 @@ def apply(root: tk.Tk) -> Fonts:
                     indicatorforeground=NEON, upperbordercolor=BORDER, lowerbordercolor=BORDER)
     style.map("TRadiobutton", indicatorbackground=[("disabled", FIELD), ("pressed", "#D8D8D8")],
               foreground=[("disabled", DISABLED_TEXT)], background=[("active", PANE)])
-    style.configure("Neon.Horizontal.TProgressbar", troughcolor=BAR_TROUGH, background=NEON,
-                    bordercolor=BAR_TROUGH, lightcolor=NEON, darkcolor=NEON, thickness=14)
     style.configure("Vertical.TScrollbar", background=BUTTON, troughcolor=FIELD, bordercolor=FIELD,
                     arrowcolor=TEXT, lightcolor=BUTTON, darkcolor=BUTTON)
     style.map("Vertical.TScrollbar", background=[("active", shade(BUTTON, 1.3))])

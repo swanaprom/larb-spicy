@@ -95,26 +95,47 @@ class RunRequestTest(unittest.TestCase):
 
 class ProgressViewTest(unittest.TestCase):
     def test_follows_the_stages(self):
+        """Label and bar through a run. None = the bar sweeps: a step without numbers,
+        or nothing done yet (the bar is never empty and still, GUI.md 2.3)."""
         view = ProgressView()
         view.start()
-        seen = []
+        seen = [(view.text, view.fraction)]
         for event in (LogEvent(Level.INFO, "sheet", "Reading song list: x"),
                       LogEvent(Level.INFO, "countdown", "cached: countdown"),
                       LogEvent(Level.INFO, "manifest", "Checking 40 row(s)", progress=(0, 40)),
-                      LogEvent(Level.INFO, "manifest", "checked 12/40", 5, progress=(12, 40)),
+                      LogEvent(Level.INFO, "manifest", "checked 10/40", 5, progress=(10, 40)),
+                      LogEvent(Level.INFO, "manifest", "row 5 ok"),           # no numbers: no change
                       LogEvent(Level.INFO, "download", "Downloading 40", progress=(0, 40)),
-                      LogEvent(Level.DEBUG, "download", "downloaded 12/40", progress=(12, 40)),
+                      LogEvent(Level.DEBUG, "download", "downloaded 20/40", progress=(20, 40)),
                       LogEvent(Level.DEBUG, "measure", "measuring 3/40", progress=(2, 40)),
                       LogEvent(Level.INFO, "render", "Rendering 40 song(s)"),
-                      LogEvent(Level.INFO, "render", "video part 3/7 done", progress=(3, 7)),
-                      LogEvent(Level.INFO, "render", "Length check ok")):
+                      LogEvent(Level.DEBUG, "render", "rendered 63%", progress=(63_900, 100_000)),
+                      LogEvent(Level.INFO, "render", "video part 3/7 written; checking it"),
+                      LogEvent(Level.INFO, "render", "rendered 70%", progress=(70_000, 100_000)),
+                      LogEvent(Level.INFO, "render", "joining the video parts and the audio")):
             view.update(event)
-            seen.append(view.text)
-        self.assertEqual(seen, ["Reading the sheet", "Preparing the countdown", "Checking 0 / 40",
-                                "Checking 12 / 40", "Downloading 0 / 40", "Downloading 12 / 40",
-                                "Measuring 2 / 40", "Rendering", "Rendering part 3 / 7",
-                                "Rendering part 3 / 7"])
-        self.assertAlmostEqual(view.fraction, 3 / 7)
+            seen.append((view.text, view.fraction))
+        self.assertEqual(seen, [("Starting", None), ("Reading the sheet", None),
+                                ("Preparing the countdown", None), ("Checking 0 / 40", None),
+                                ("Checking 10 / 40", 0.25), ("Checking 10 / 40", 0.25),
+                                ("Downloading 0 / 40", None), ("Downloading 20 / 40", 0.5),
+                                ("Measuring 2 / 40", 0.05), ("Rendering", None),
+                                ("Rendering 63%", 0.639), ("Rendering", None),
+                                ("Rendering 70%", 0.7), ("Rendering", None)])
+
+    def test_render_percentage_for_audio_and_video(self):
+        """The same events in both modes: milliseconds of planned output written."""
+        view = ProgressView()
+        view.update(LogEvent(Level.DEBUG, "render", "rendered 1%", progress=(1_400, 140_020)))
+        self.assertEqual((view.text, round(view.fraction, 3)), ("Rendering 0%", 0.01))
+        view.update(LogEvent(Level.INFO, "render", "rendered 100%", progress=(140_020, 140_020)))
+        self.assertEqual((view.text, view.fraction), ("Rendering 100%", 1.0))
+
+    def test_stopping_sweeps(self):
+        view = ProgressView()
+        view.update(LogEvent(Level.INFO, "manifest", "checked 10/40", 5, progress=(10, 40)))
+        view.stopping()
+        self.assertEqual((view.text, view.fraction), ("Stopping...", None))
 
     def test_how_it_ended(self):
         view = ProgressView()

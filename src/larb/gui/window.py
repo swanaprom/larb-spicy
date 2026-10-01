@@ -5,10 +5,7 @@ The window reads the settings once when it opens and saves them when Run is pres
 (SPEC §7). It never calls yt-dlp or FFmpeg (SPEC §5).
 """
 
-import os
 import queue
-import subprocess
-import sys
 import time
 import tkinter as tk
 from datetime import datetime
@@ -22,16 +19,18 @@ from larb.core.errors import LarbError, StoppedError
 from larb.core.models import Level, LogEvent, Settings
 from larb.core.settings import correct_crossfade, ensure_folder, validate_settings
 from larb.gui import shortcuts, system, theme
+from larb.gui.opening import OpenAttempt, start_open
 from larb.gui.runner import Done, RunWorker, cache_folder
 from larb.gui.state import (ActiveDownloads, Fields, LogCounts, LogFilter, Phase, ProgressView,
-                            bottom_row, clear_cache_question, controls, log_line, run_request,
-                            settings_from_fields, shown_folder, shown_in_log, visible)
-from larb.gui.widgets import ColorButton, HoverHint, PlaceholderEntry, SweepBar, ask
+                            bottom_row, clear_cache_question, controls, log_line, open_failure_message,
+                            run_request, settings_from_fields, shown_folder, shown_in_log, visible)
+from larb.gui.widgets import ColorButton, HoverHint, OverallBar, PlaceholderEntry, SweepBar, ask
 
 TITLE = "LARB - Spicy"
 POLL_MS = 100           # how often the window takes new events from the run
 TICK_MS = 1000          # how often the download timers move
 MAX_EVENTS_PER_POLL = 500   # keeps the window responsive when a burst of events arrives
+OPEN_POLL_MS = 200      # how often an Open file / Open folder click is checked for failure
 LABEL_CHARS = 48        # active download titles are cut to this
 MIRROR_HINT = ("Everything: every song ends up mirrored; rows already marked in the sheet's "
                "Mirrored column are not flipped twice. Ignore: nothing is flipped.")
@@ -209,7 +208,7 @@ class Window:
         progress.columnconfigure(1, weight=1)
         self.progress_label = ttk.Label(progress, text="", style="Progress.TLabel", width=26)
         self.progress_label.grid(row=0, column=0, sticky="w", padx=(0, 10))
-        self.progress_bar = ttk.Progressbar(progress, style="Neon.Horizontal.TProgressbar", maximum=1.0)
+        self.progress_bar = OverallBar(progress)
         self.progress_bar.grid(row=0, column=1, sticky="ew")
 
         # Room for the active downloads is kept even when there are none, so the log
@@ -369,7 +368,7 @@ class Window:
 
     def _stop_run(self) -> None:
         self.phase = Phase.STOPPING
-        self.progress.text = "Stopping..."
+        self.progress.stopping()
         self._paint_progress()
         self._apply_controls()
         self.worker.stop()
@@ -445,6 +444,7 @@ class Window:
         if self.progress.failed:
             # The reason can be long (e.g. a missing column and the ones found): it takes
             # the bar's place and wraps instead of being cut off.
+            self.progress_bar.set(0.0)   # hidden: stop any sweep
             self.progress_bar.grid_remove()
             self.progress_label.grid(columnspan=2)
             self.progress_label.configure(text=self.progress.text, style="Stopped.TLabel", width=0,
@@ -454,7 +454,7 @@ class Window:
             self.progress_label.grid(columnspan=1)
             self.progress_label.configure(text=self.progress.text, style="Progress.TLabel", width=26,
                                           wraplength=0)
-            self.progress_bar.configure(value=self.progress.fraction)
+            self.progress_bar.set(self.progress.fraction)
 
     def _paint_downloads(self) -> None:
         lines = self.downloads.lines(time.monotonic())
@@ -544,11 +544,28 @@ class Window:
 
     def _open_file(self) -> None:
         if self.output_path:
-            _open_with_system(self.output_path)
+            self._watch_open(start_open(self.output_path), self.output_path, is_folder=False)
 
     def _open_folder(self) -> None:
         if self.output_path:
-            _open_with_system(self.output_path.parent)
+            self._watch_open(start_open(self.output_path.parent), self.output_path.parent, is_folder=True)
+
+    def _watch_open(self, attempt: OpenAttempt, path: Path, is_folder: bool) -> None:
+        """When opening fails, say why: a pop-up, and a warning in the log (GUI.md 2.4)."""
+        if not attempt.done.is_set():
+            self.root.after(OPEN_POLL_MS, self._watch_open, attempt, path, is_folder)
+            return
+        if attempt.error is None:
+            return
+        message = open_failure_message(path, is_folder, attempt.error)
+        event = LogEvent(Level.WARNING, "output", message.replace("\n", " "))
+        follow = self._log_at_bottom()
+        self.counts.add(event)
+        self._append_log(event)
+        self._paint_filters()
+        if follow:
+            self.log.see("end")
+        self._popup("Open folder" if is_folder else "Open file", message)
 
     # -- dialogs and closing ------------------------------------------------------------
 
@@ -589,13 +606,3 @@ class Window:
             return False
         self.settings = settings
         return True
-
-
-def _open_with_system(path: Path) -> None:
-    """The system's default app for a file, or its file manager for a folder."""
-    if sys.platform == "win32":
-        os.startfile(path)   # noqa: S606 - opening the operator's own output
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", str(path)])
-    else:
-        subprocess.Popen(["xdg-open", str(path)])
