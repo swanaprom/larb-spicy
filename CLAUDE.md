@@ -4,51 +4,7 @@ Random Dance combiner: reads a song list from a Google Sheet, downloads the YouT
 
 ## Current phase
 
-**SLICE 6 — reliability**, branch `slice-6-reliability`. Fixes found in real use on a native Ubuntu 24.04 PC (fast network) and planned in SPEC §9 ("Planned (slice 6)" notes in stages 3, 4, 5, 7) and GUI.md 2.3. If any item needs a port change, propose it and stop.
-
-Scope, in this order:
-
-1. **Record the Ubuntu findings in TECH.md first** (maintainer's test, 2026-09):
-   - **The PC:** a real (not VM) Ubuntu 24.04 PC. Python 3.12.4 was already installed (in range).
-   - **tkinter** was missing; setup's printed command fixed it on the first try.
-   - **The window icon** doesn't show (normal on that desktop).
-   - **Open file** failed until a media player was installed (the console said "no media player found"); after installing VLC it worked.
-   - **Output:** audio and mirrored video both worked. 5 songs took well under a minute on a fast network.
-   - **A cached countdown still triggered the bot check** during look-ups, and rows were skipped after their retries ran out. Re-running a few minutes later recovered the missing song.
-2. **Countdown without a picture, in video mode.** Show a **black screen** for its length, with its sound, and one warning per run. Nothing else is drawn. Apply the same rule to any clip without a picture, with a row warning for songs.
-3. **Render progress.** The FFmpeg adapter reports how much of the planned output has been written, as plain done/total numbers through the existing progress events.
-   - **GUI:** a filling bar with "Rendering 63%", for audio and video. Any step without numbers (e.g. between video parts, the final join) shows the sweeping bar. The bar is never empty and still.
-   - **Terminal:** one progress line every 10%, no more.
-4. **Cache-aware checking** (SPEC §9 stage 4).
-   - A row whose file **for this run's mode** is cached skips the YouTube look-up; its length is measured from the file. The countdown too.
-   - If only the other mode is cached, it's still looked up (the download needs it).
-   - All existing length rules still apply to measured lengths: trim to fit within ~1 s with a warning, otherwise a row error.
-5. **Smarter retries** (SPEC §9 stage 5). **Measure first, briefly:**
-   - Try a few 403 retry wait patterns on the maintainer's **home** connection (never a company network), time-boxed. Stop at the first bot check, and record what you saw in TECH.md.
-   - Then build:
-     - **403:** waits that grow each attempt and are slightly randomised, so parallel retries don't arrive together.
-     - **Bot check / HTTP 429:** start no new look-ups or downloads, let running ones end, keep everything cached, and stop the run with a clear message ("YouTube is limiting this connection. Wait a while, then run again; finished songs stay cached."). In the GUI that's the aborted-run pop-up.
-     - All waits stay interruptible by Stop.
-6. **Open file / Open folder failing:** show a pop-up with the reason (e.g. "No app is set to open .mp4 files. Install a media player, or use Open folder."), and log it as a warning.
-7. **Docs:** HANDOFF's rate-limit and Open file sections describe the new behaviour. TECH.md gets the measurements and quirks.
-
-Acceptance:
-
-1. **Black screen:** an offline test with an `.mp3` countdown in video mode gives a valid output of the planned length, black during the countdowns, and exactly one warning. The maintainer views it.
-2. **Render progress:**
-   - An offline test checks the render's progress events rise to their total.
-   - A GUI-state test checks the label shows the percentage, and that the bar sweeps when there are no numbers.
-   - Live audio and video runs show the bar filling, with no still, empty bar between parts. The maintainer watches.
-3. **Cache-aware checking:**
-   - An offline test with a fake media source that counts look-ups: cached rows and a cached countdown make **zero** look-ups; a row cached only in the other mode is still looked up; a cached row whose end time is past its real length is still trimmed or rejected by the existing rules.
-   - Live: a second identical run makes no YouTube look-ups (shown in the log).
-4. **Retries:**
-   - The measurement is reported.
-   - Offline tests (with a controllable clock and randomness) check that 403 waits grow and vary.
-   - A simulated bot check stops the run cleanly: no new requests start, cached songs stay, and the message is clear.
-   - Stop during a retry wait ends promptly.
-5. **Open file failure:** an offline test simulates a missing app and checks for the pop-up and the warning.
-6. **No regressions:** all tests pass; the terminal path works; live audio and video runs succeed with lengths matching.
+No active slice.
 
 How every slice works:
 1. Work only on the slice's branch, created from an up-to-date `main`.
