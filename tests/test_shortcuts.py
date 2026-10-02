@@ -22,6 +22,45 @@ OTHER_V = ("k", 86, 55)
 OTHER_A = ("k", 65, 38)
 ENGLISH_V = ("v", 86, 55)
 PLAIN_K = ("k", 75, 45)
+US_ENGLISH = "00000409"
+
+
+class EnglishKeyboard:
+    """Windows: lets a test generate keys with the US English layout, whatever layout is active.
+
+    Tk turns a generated key's keysym into a key through the active layout, so with Thai
+    active (as successors often have) "k" has no key and the tests failed with
+    `no keycode for keysym "k"`. With Windows' default "one input method for all apps",
+    the layout belongs to the whole session and is re-applied whenever a window gets focus,
+    so English is switched on right before each generated key (activate()), and the
+    layout that was active is put back after the test. While a test runs, the session's
+    language bar may briefly show English. Elsewhere this does nothing.
+    """
+
+    def __init__(self, test: unittest.TestCase) -> None:
+        self._english = None
+        if sys.platform != "win32":
+            return
+        import ctypes
+        self._user32 = user32 = ctypes.windll.user32
+        user32.LoadKeyboardLayoutW.restype = ctypes.c_void_p
+        user32.GetKeyboardLayout.restype = ctypes.c_void_p
+        user32.ActivateKeyboardLayout.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        user32.ActivateKeyboardLayout.restype = ctypes.c_void_p
+        user32.UnloadKeyboardLayout.argtypes = [ctypes.c_void_p]
+        count = user32.GetKeyboardLayoutList(0, None)
+        layouts = (ctypes.c_void_p * count)()
+        user32.GetKeyboardLayoutList(count, layouts)
+        previous = user32.GetKeyboardLayout(0)
+        self._english = user32.LoadKeyboardLayoutW(US_ENGLISH, 0)
+        # Cleanups run last first: the old layout is put back, then English unloaded.
+        if self._english not in set(layouts):   # loaded only for this test: don't leave it behind
+            test.addCleanup(user32.UnloadKeyboardLayout, self._english)
+        test.addCleanup(user32.ActivateKeyboardLayout, previous, 0)
+
+    def activate(self) -> None:
+        if self._english:
+            self._user32.ActivateKeyboardLayout(self._english, 0)
 
 
 class ActionTest(unittest.TestCase):
@@ -60,12 +99,14 @@ class InWidgetTest(unittest.TestCase):
         self.entry.pack()
         shortcuts.install(self.root)   # after the widgets exist, as the window does
         self.root.update()
+        self.keyboard = EnglishKeyboard(self)
 
     def press(self, key):
         keysym, windows_code, linux_code = key
         self.entry.focus_force()
         self.root.update()
         code = windows_code if sys.platform == "win32" else linux_code
+        self.keyboard.activate()   # after focusing: getting focus re-applies the session's layout
         self.entry.event_generate("<Control-KeyPress>", keysym=keysym, keycode=code, when="now")
         self.root.update()
 
@@ -106,6 +147,7 @@ class InWidgetTest(unittest.TestCase):
         text.focus_force()
         self.root.update()
         code = {"win32": (65, 67)}.get(sys.platform, (38, 54))
+        self.keyboard.activate()
         text.event_generate("<Control-KeyPress>", keysym="k", keycode=code[0], when="now")
         text.event_generate("<Control-KeyPress>", keysym="k", keycode=code[1], when="now")
         self.root.update()
