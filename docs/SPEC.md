@@ -15,7 +15,7 @@ When goals conflict, the order decides.
 
 1. **Reliability** — pipeline fails loudly and specifically, never silently produces a bad combination.
 2. **Maintainability** — next maintainer (possibly with little Python experience) can read this doc + code and make a small change safely.
-3. **Efficiency** — faster than the `moviepy` prototype. Baseline (2026-09, i5-6400, same 5 songs, 720p video): prototype 605 s, this pipeline 104 s end to end, about 5.8× faster, at higher quality. Target: don't regress below this baseline. Details in TECH §10.
+3. **Efficiency** — faster than the `moviepy` prototype. Baseline (2026-09, i5-6400, same 5 songs, 720p video): prototype 605 s, this pipeline 104 s end to end, about 5.8× faster, at higher quality. Target: don't regress below this baseline. Details in TECH §10. In real use (2026-10, maintainer's home connection, empty cache, a YouTube video playing in the background): a 96-song list producing 1 h 4 min took about as long to make as to watch.
 
 ## 3. Non-Goals
 
@@ -92,7 +92,7 @@ Adapters are connected to ports in exactly one place, `src/larb/app.py`, used by
 
 Write the actual schema, not just "it's configurable." This is the contract between GUI and core.
 
-The live file is `config/config.toml` (gitignored). On first run it's created from `config/example.toml`, comments included. It deliberately does **not** live in `workspace/`, since that folder gets deleted to free space and settings shouldn't go with it.
+The live file is `config/config.toml` (gitignored). The window also keeps `config/last_inputs.toml` for its remembered Sheet and Countdown fields (GUI.md 1.1); that's what was typed, not a setting, so it's a separate file that the core never reads and Clear cache never touches. On first run it's created from `config/example.toml`, comments included. It deliberately does **not** live in `workspace/`, since that folder gets deleted to free space and settings shouldn't go with it.
 
 Keys marked **file-only** are never shown in the GUI. They hold values chosen by testing (see TECH.md); change them only after re-testing.
 
@@ -203,6 +203,8 @@ Turn your numbered usage scenario into a state machine / stage list with **input
 
 **Stopped by the operator:** in the GUI, the Run button becomes Stop during a run, and stopping asks for confirmation first. A stopped run ends like any failed one: nothing unverified gets the final output name (anything already rendered becomes `_FAILED`; a stopped *video* render usually leaves nothing, since its output file only exists after the final join), songs already downloaded stay cached (a download that's already merging is allowed to finish), and interrupted downloads are cleaned up. A YouTube look-up already in progress finishes first, so a stop can take a couple of seconds: a clean result matters more than a fast stop. Then the GUI unlocks. Measured 2026-09: a live run ends within about 2–4 s of Stop.
 
+**Estimated length (GUI's Est. Length button):** runs the same steps as a real run up to the render plan (read the sheet with the window's row range, prepare the countdown, apply the same clip rules, build the same plan) and reports the plan's length. It never renders and never contacts YouTube for songs: cached songs are measured from their files (exact), the others are taken from their time ranges with padding. The one exception is an uncached countdown URL, which is downloaded with the normal retry policy, since its YouTube length is rounded and that error would repeat before every song; the run then finds it cached. Rows a run would skip (time range can't be read, URL empty, too short, past the end of a cached file) are left out and counted, one line per reason. Accuracy (2026-09/10): a 3-song sheet matched to the millisecond; a 96-song list with nearly everything uncached estimated 1 h 4 min 6 s and produced 1 h 4 min 5 s. A deleted YouTube video is still counted; the run catches it at download time.
+
 ## 10. Caching Strategy
 
 - Cache key: `{videoID}_{audio|v<max_height>}`, e.g. `abc123_audio`, `abc123_v720`. The ID alone identifies the video; the suffix separates audio-only from video downloads, so each mode downloads its own file once. The `v` number is the `max_height` setting, not the file's real height, so changing that setting never reuses a lower-quality file.
@@ -257,6 +259,7 @@ Running list — append here instead of losing the thought between sessions.
 - YouTube reports song length rounded to whole seconds, so the early check (§8) can't catch every overrun; the after-download check (§9 stage 6) stays as the second guard.
 - Sheet column mapping is file-only for now (§7). A future generation can expose it in the GUI if the sheet layout changes often.
 - YouTube may rate-limit a connection after heavy use ("Sign in to confirm you're not a bot", then HTTP 429). It clears on its own after an hour or more. The program stops cleanly when it happens (§9 stage 5), and HANDOFF tells the operator to wait and run again. Using browser cookies would avoid it, but borrows a logged-in account's session, so it's deliberately not supported for now (maintainer decision 2026-09-28; see HANDOFF upgrades).
+- One project folder must not be run from both Windows and WSL/Linux: they share the `.venv` folder but need different ones, so each side rebuilds (or half-rebuilds) the other's, and a half-built venv can make tools fall back to the system Python. Use a separate clone inside Linux (e.g. `~/`). Windows recovers by itself on the next run. (Seen 2026-10.)
 - The rate-limit stop (§9 stage 5) has only been tested with a simulated bot check; none happened in the 2026-09 tests. Songs not yet cached still need YouTube look-ups, so a very long first run is where a limit is most likely.
 
 ## 15. Repository & Version Control
@@ -286,12 +289,14 @@ larb-spicy/
 ├── tools/env_setup.py    # everything after that, shared by all OSes
 ├── config/example.toml   # committed template
 ├── config/config.toml    # live settings, gitignored
+├── config/last_inputs.toml # the window's remembered Sheet / Countdown fields, gitignored (not settings)
 ├── src/larb/core/        # rules + orchestration, ports, models, errors (stdlib only)
 ├── src/larb/adapters/    # TOML, sheet, yt-dlp, FFmpeg, console
 ├── src/larb/app.py       # the one place adapters are connected to ports
 ├── src/larb/cli.py       # terminal front end: python -m larb <sheet> [--countdown <file or URL>] [--rows first-last];
 │                         #   with no arguments, python -m larb opens the window
-├── src/larb/gui/         # the window (docs/GUI.md); its decisions live in gui/state.py, testable without Tkinter
+├── src/larb/gui/         # the window (docs/GUI.md); its decisions live in gui/state.py, testable without Tkinter;
+│                         #   gui/memory.py reads/writes config/last_inputs.toml
 ├── tests/                # offline tests
 ├── tests/fixtures/       # tiny clips for the tests
 └── workspace/            # gitignored

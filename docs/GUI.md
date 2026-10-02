@@ -101,7 +101,7 @@ Card fields: **Kind** · **Maps to** (config key, or run input = not saved) · *
 - **Kind:** one-line text field + Browse button (Browse picks a local CSV).
 - **Maps to:** run input.
 - **Default:** the sheet used at the last Run (remembered, see below); empty the first time, with the placeholder "Google Sheet link / Path to CSV file".
-- **Remembered:** saved when Run is pressed, in `config/last_inputs.toml` (its own file, not `config.toml`: it's what one run used, not a setting). Filled in when the window opens. A missing or unreadable file just leaves the field empty; a remembered file that's gone is reported on Run as usual.
+- **Remembered:** like a browser continuing the last session. Saved, exactly as it is (empty too), when Run is pressed and whenever the window closes, however it closes; no question is asked. Stored in `config/last_inputs.toml` (its own file, not `config.toml`: it's what was typed, not a setting). Filled in when the window opens. A missing or unreadable file just leaves the field empty; a remembered file that's gone is reported on Run as usual.
 - **Checked when:** on Run. A private or unreachable sheet, or a missing column header, aborts the run with a pop-up (see "Aborted runs").
 - **During a run:** locked.
 - **Why here:** used every single run, so it's first.
@@ -132,7 +132,7 @@ Card fields: **Kind** · **Maps to** (config key, or run input = not saved) · *
 ### 1.4 Countdown
 - **Kind:** one-line field that accepts a YouTube link or a file, + Browse button. When empty, shows "(default countdown)".
 - **Maps to:** run input (`--countdown`). Empty → the core uses `countdown.default_urls` / `default_files` (§7). **Never changes the default:** defaults are the fallback, this field is for one run.
-- **Default:** what was in the field at the last Run (remembered with the Sheet field, see 1.1); empty = the default countdown.
+- **Default:** what was in the field when the window last closed or Run was pressed (remembered with the Sheet field, see 1.1); empty = the default countdown.
 - **Checked when:** on Run, before the manifest (§9 stage 3).
 - **During a run:** locked.
 - **Why here:** usually left alone; below the per-event choices.
@@ -225,7 +225,7 @@ Card fields: **Kind** · **Maps to** (config key, or run input = not saved) · *
 ## Dialogs
 
 - **Aborted runs** (private sheet, missing header, bad row range, no countdown, output folder can't be created, or any unexpected error): a **blocking pop-up** with the core's message. An operator's own Stop shows no pop-up. The main window can't be used until it's closed. The progress label also shows "Stopped: <reason>".
-- **Closing with unsaved edits:** ask "Save your changes?" [Save] [Don't save] [Cancel].
+- **Closing with unsaved edits:** ask "Save your changes?" [Save] [Don't save] [Cancel]. This is about **settings** only; the Sheet and Countdown fields are remembered either way (1.1). Cancel keeps the window open and saves nothing.
 - **Closing during a run:** ask "A run is in progress. Stop it and close?" [Stop and close] [Keep running], with Keep running as the default.
 
 ---
