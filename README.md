@@ -16,10 +16,9 @@ Hence the variant name, **Spicy~**
 
 You need **git** and an internet connection. Everything else (the right Python, the libraries,
 FFmpeg) is found or set up by the scripts, inside this folder. They ask before installing
-anything outside it.
+anything outside it. (If you don't want to download git, you can also download from release tag, but it doesn't guarantee updating via git is compatible - See the Youtube Tutorial above)
 
 **1. Clone** the repository (any folder, spaces in the path are fine):
-(or download from tags, but downloading not guarantee git updating compatibility)
 ```
 git clone https://github.com/swanaprom/larb-spicy.git
 cd larb-spicy
@@ -48,6 +47,8 @@ In the window, paste the sheet link and press **Run**. The terminal version take
 Settings are in `config/config.toml` (created on the first run from `config/example.toml`,
 which explains each setting); the window saves its choices there when you press Run. The
 output lands in `workspace/output/` unless you choose another folder.
+
+Also, you can estimate output length before the run with the button **Est. Length**, in case you are working with event that has time constraint.
 
 The sheet must be shared as **"Anyone with the link"** (viewer is enough).
 
