@@ -165,7 +165,7 @@ The pop-up also says how many rows a run would skip and why (e.g. "2 rows left o
 
 ## The Sheet and Countdown fields come back by themselves
 
-The window remembers what was in them at the last Run, in `config/last_inputs.toml` (not in `config.toml`; deleting it is harmless, the fields just start empty). The row range is **not** remembered, on purpose: a range left over from yesterday could silently cut today's run short.
+The window remembers what was in them when you last pressed Run or closed the window (even if you emptied them), in `config/last_inputs.toml` (not in `config.toml`; deleting it is harmless, the fields just start empty). The row range is **not** remembered, on purpose: a range left over from yesterday could silently cut today's run short.
 
 ## What are recommended upgrades?
 
