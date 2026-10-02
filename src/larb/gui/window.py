@@ -7,6 +7,7 @@ file (memory.py). It never calls yt-dlp or FFmpeg (SPEC §5).
 """
 
 import queue
+import sys
 import time
 import tkinter as tk
 from dataclasses import replace
@@ -366,11 +367,7 @@ class Window:
             return
         self.settings = request.settings
         self._clear_log()
-        fields = self._fields()
-        # Remembered when Run is pressed (GUI.md 1.1, 1.4). Never the row range: a
-        # remembered range could silently cut the next run short.
-        problem = save_last_inputs(self.inputs_file, LastInputs(sheet=fields.source.strip(),
-                                                                countdown=fields.countdown.strip()))
+        problem = self._remember_inputs()
         if problem:
             self._log_now(LogEvent(Level.WARNING, "start",
                                    f"The Sheet and Countdown fields can't be remembered: {problem}"))
@@ -385,6 +382,26 @@ class Window:
         self.worker.start()
         self.root.after(POLL_MS, self._poll)
         self.root.after(TICK_MS, self._tick)
+
+    def _remember_inputs(self) -> str | None:
+        """Remember the Sheet and Countdown fields as they are, even empty (GUI.md 1.1, 1.4):
+        when Run is pressed and when the window closes. Never the row range: a remembered
+        range could silently cut the next run short. Returns why it failed, or None."""
+        fields = self._fields()
+        return save_last_inputs(self.inputs_file, LastInputs(sheet=fields.source.strip(),
+                                                             countdown=fields.countdown.strip()))
+
+    def _close(self) -> None:
+        """Close the window for good. The fields are remembered first; there's nobody left
+        to tell if that fails, so it's only printed to the console."""
+        problem = self._remember_inputs()
+        if problem:
+            print(f"The Sheet and Countdown fields can't be remembered: {problem}", file=sys.stderr)
+        # Pending timers (_poll, _tick, bar sweeps) would fire into destroyed widgets and print
+        # "invalid command name". Raw Tcl cancel: after_cancel would delete commands destroy() still owns.
+        for timer in self.root.tk.call("after", "info"):
+            self.root.tk.call("after", "cancel", timer)
+        self.root.destroy()
 
     def _start_estimate(self) -> None:
         """Est. Length (GUI.md 3.2): the length a run with the fields as they are would
@@ -412,10 +429,15 @@ class Window:
         self.root.after(TICK_MS, self._tick)
 
     def _finish_estimate(self, done: Done) -> None:
+        # The progress area goes back to what the last run left ("Finished" / "Stopped: ..."),
+        # or, before any run, to hidden and still: painting it would show a sweeping bar.
         self.phase = self.phase_before_estimate
         self.progress = self.progress_before_estimate
-        self._show_progress(self.phase is not Phase.IDLE)
-        self._paint_progress()
+        if self.phase is Phase.IDLE:
+            self.progress_bar.set(0.0)   # stops the sweep
+            self._show_progress(False)
+        else:
+            self._paint_progress()
         self._apply_controls()
         if self.closing:
             # The window was closed during the estimate: now the usual close (which may
@@ -492,7 +514,7 @@ class Window:
             self.phase = Phase.FAILED
         self._apply_controls()
         if self.closing:
-            self.root.destroy()
+            self._close()
             return
         if done.error is not None and not isinstance(done.error, StoppedError):
             # Aborted: a blocking pop-up with the core's message (GUI.md "Dialogs").
@@ -681,7 +703,7 @@ class Window:
                 return
             if answer == "save" and not self._save_settings():
                 return
-        self.root.destroy()
+        self._close()
 
     def _save_settings(self) -> bool:
         self._fix_crossfade()

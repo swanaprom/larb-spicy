@@ -15,7 +15,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fakes import ROOT  # noqa: E402  (also puts src/ on the path)
+from fakes import ROOT, close_root  # noqa: E402  (also puts src/ on the path)
 from larb.adapters.toml_settings import TomlSettingsStore  # noqa: E402
 from larb.core.errors import LarbError, StoppedError  # noqa: E402
 from larb.core.manifest import BAD_TIME_RANGE, URL_EMPTY  # noqa: E402
@@ -26,12 +26,6 @@ from larb.gui.state import (Phase, ProgressView, controls, estimate_log_line, es
                             length_text)
 
 ESTIMATE = LengthEstimate(6380.0, 40, 30, ((BAD_TIME_RANGE, 2), (URL_EMPTY, 1)))
-
-
-def cancel_timers(root):
-    """Cancel the window's pending timers, so they don't fire after it's destroyed."""
-    for timer in root.tk.call("after", "info"):
-        root.tk.call("after", "cancel", timer)   # not after_cancel: destroy() still owns the command
 
 
 class ButtonTest(unittest.TestCase):
@@ -166,8 +160,7 @@ class WindowEstimateTest(unittest.TestCase):
             self.root = tk.Tk()
         except tk.TclError as e:
             self.skipTest(f"no display: {e}")
-        self.addCleanup(self.root.destroy)
-        self.addCleanup(cancel_timers, self.root)   # runs first: the window's timers die with it
+        self.addCleanup(close_root, self.root)
         self.root.withdraw()
         self.dir = Path(tempfile.mkdtemp(prefix="test_", dir=ROOT / "workspace"))
         self.addCleanup(shutil.rmtree, self.dir, True)
@@ -225,6 +218,57 @@ class WindowEstimateTest(unittest.TestCase):
         self.window.est_length.invoke()
         self.assertEqual(self.popups[0][0], "Can't estimate")
         self.assertEqual(FakeEstimateWorker.created, [])
+
+    def bar_sweeping(self) -> bool:
+        return self.window.progress_bar._job is not None
+
+    def test_progress_area_idle_again_before_any_run(self):
+        """The bar used to keep sweeping after an estimate (maintainer report, 2026-10-02)."""
+        self.window.sheet.set_value("https://sheet")
+        self.window.est_length.invoke()
+        self.assertTrue(self.bar_sweeping())   # "Estimating length"
+        self.wait_for_popup()
+        self.root.update()
+        self.assertFalse(self.bar_sweeping())
+        self.assertEqual(self.window.progress_bar.winfo_manager(), "")    # hidden, as before a run
+        self.assertEqual(self.window.progress_label.winfo_manager(), "")
+
+    def test_progress_area_shows_the_last_run_again(self):
+        for error in (None, LarbError("The sheet is private.")):
+            self.popups.clear()
+            self.window.phase = Phase.FINISHED if error is None else Phase.FAILED
+            self.window.progress.finish(error)
+            self.window._show_progress(True)
+            self.window._paint_progress()
+            label = self.window.progress.text
+            self.window.sheet.set_value("https://sheet")
+            self.window.est_length.invoke()
+            self.wait_for_popup()
+            self.root.update()
+            self.assertFalse(self.bar_sweeping())
+            self.assertEqual(self.window.progress_label.cget("text"), label)   # "Finished" / "Stopped: ..."
+
+    def test_closing_during_an_estimate(self):
+        """Closes once the estimate has ended, remembering the fields; no pop-up."""
+        class SlowWorker(FakeEstimateWorker):
+            def start(self):
+                pass   # answers only when stopped
+
+            def stop(self):
+                self.queue.put(Done(None, StoppedError("Stopped by the operator")))
+        self.window.sheet.set_value("https://sheet")
+        with mock.patch.object(window, "EstimateWorker", SlowWorker):
+            self.window.est_length.invoke()
+        self.window._on_close()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                self.root.update()
+            except tk.TclError:   # destroyed: closed
+                break
+        self.assertRaises(tk.TclError, self.root.winfo_exists)
+        self.assertEqual(self.popups, [])
+        self.assertIn("https://sheet", (self.dir / "last_inputs.toml").read_text(encoding="utf-8"))
 
     def test_stopped_estimate_says_nothing(self):
         FakeEstimateWorker.done = Done(None, StoppedError("Stopped by the operator"))

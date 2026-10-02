@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+import tkinter as tk
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,17 @@ THAI_MP4 = next(FIX.glob("*.mp4"))            # 7.27 s, awkward name on purpose
 CD_MP3 = FIX / "countdown" / "!countdown.mp3"
 CD_MP4 = FIX / "countdown" / "!countdown.mp4"
 CD_OPUS = FIX / "countdown" / "tone_3s.webm"    # Opus: container says 3.008 s, decodes to 3.000 s
+
+
+def close_root(root):
+    """Test cleanup for a real window: cancel its pending timers, so they don't fire after
+    it's destroyed, then destroy it, unless the test already closed it."""
+    try:
+        for timer in root.tk.call("after", "info"):
+            root.tk.call("after", "cancel", timer)   # not after_cancel: destroy() still owns the command
+        root.destroy()
+    except tk.TclError:   # already destroyed
+        pass
 
 
 class FakeSongs(SongListSource):

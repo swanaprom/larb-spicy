@@ -13,21 +13,15 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fakes import ROOT  # noqa: E402  (also puts src/ on the path)
+from fakes import ROOT, close_root  # noqa: E402  (also puts src/ on the path)
 from larb.adapters.toml_settings import TomlSettingsStore  # noqa: E402
 from larb.core.cache import clear_cache  # noqa: E402
-from larb.core.models import Settings  # noqa: E402
+from larb.core.models import OutputSettings, Settings  # noqa: E402
 from larb.gui import window  # noqa: E402
 from larb.gui.memory import LastInputs, load_last_inputs, save_last_inputs  # noqa: E402
 
 SHEET = "https://docs.google.com/spreadsheets/d/abc/edit"
 COUNTDOWN = r"D:\เพลง\countdown.mp4"   # Thai in the path on purpose
-
-
-def cancel_timers(root):
-    """Cancel the window's pending timers, so they don't fire after it's destroyed."""
-    for timer in root.tk.call("after", "info"):
-        root.tk.call("after", "cancel", timer)   # not after_cancel: destroy() still owns the command
 
 
 class MemoryFileTest(unittest.TestCase):
@@ -69,6 +63,83 @@ class MemoryFileTest(unittest.TestCase):
         self.assertEqual(load_last_inputs(self.file), LastInputs(SHEET, COUNTDOWN))
 
 
+class ClosingTest(unittest.TestCase):
+    """Closing the window remembers the Sheet and Countdown fields as they are, without asking."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="test_", dir=ROOT / "workspace"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.file = self.dir / "last_inputs.toml"
+        self.store = TomlSettingsStore(self.dir / "config.toml", ROOT / "config" / "example.toml")
+        try:
+            self.root = tk.Tk()
+        except tk.TclError as e:
+            self.skipTest(f"no display: {e}")
+        self.addCleanup(close_root, self.root)
+        self.root.withdraw()
+        settings = Settings(output=OutputSettings(directory=str(self.dir / "out")))
+        self.win = window.Window(self.root, self.store, settings, mac=False, inputs_file=self.file)
+        self.questions = []
+
+    def close(self, answer=None):
+        """Close the window; `answer` is what the operator picks if a question comes up."""
+        def ask(_root, title, message, buttons, **_kwargs):
+            self.questions.append(message)
+            return answer
+        with mock.patch.object(window, "ask", ask):
+            self.win._on_close()
+
+    def closed(self) -> bool:
+        try:
+            self.root.winfo_exists()
+            return False
+        except tk.TclError:
+            return True
+
+    def remembered(self) -> dict:
+        return tomllib.loads(self.file.read_text(encoding="utf-8"))
+
+    def test_edited_fields(self):
+        save_last_inputs(self.file, LastInputs("https://old-sheet", "old.mp4"))
+        self.win.sheet.set_value(SHEET)
+        self.win.countdown.set_value(COUNTDOWN)
+        self.win.rows_from.insert(0, "3")
+        self.close()
+        self.assertTrue(self.closed())
+        self.assertEqual(self.questions, [])   # no question: only settings are asked about
+        self.assertEqual(self.remembered(), {"sheet": SHEET, "countdown": COUNTDOWN})   # no row range
+
+    def test_cleared_fields(self):
+        save_last_inputs(self.file, LastInputs(SHEET, COUNTDOWN))
+        self.win.sheet.set_value("")
+        self.win.countdown.set_value("")
+        self.close()
+        self.assertEqual(self.remembered(), {"sheet": "", "countdown": ""})
+
+    def test_save_from_the_close_question(self):
+        self.win.sheet.set_value(SHEET)
+        self.win._set_entry(self.win.crossfade, "2")   # an unsaved setting: the question comes up
+        self.close(answer="save")
+        self.assertEqual(self.questions, ["Save your changes?"])
+        self.assertTrue(self.closed())
+        self.assertEqual(self.remembered()["sheet"], SHEET)
+        self.assertEqual(self.store.load().processing.crossfade_duration_seconds, 2.0)
+
+    def test_dont_save_still_remembers_the_fields(self):
+        self.win.sheet.set_value(SHEET)
+        self.win._set_entry(self.win.crossfade, "2")
+        self.close(answer="discard")
+        self.assertEqual(self.remembered()["sheet"], SHEET)
+        self.assertFalse((self.dir / "config.toml").exists())   # the settings weren't saved
+
+    def test_cancel_keeps_the_window_and_remembers_nothing(self):
+        self.win.sheet.set_value(SHEET)
+        self.win._set_entry(self.win.crossfade, "2")
+        self.close(answer="cancel")
+        self.assertFalse(self.closed())
+        self.assertFalse(self.file.exists())
+
+
 class IdleWorker:
     """Stands in for the run: never sends anything."""
 
@@ -97,8 +168,7 @@ class WindowMemoryTest(unittest.TestCase):
             root = tk.Tk()
         except tk.TclError as e:
             self.skipTest(f"no display: {e}")
-        self.addCleanup(root.destroy)
-        self.addCleanup(cancel_timers, root)   # runs first: the window's timers die with it
+        self.addCleanup(close_root, root)
         root.withdraw()
         # Output to the test folder, so a Run press doesn't touch workspace/output.
         self.settings = Settings(output=self.settings.output.__class__(directory=str(self.dir / "out")))
